@@ -1,0 +1,27 @@
+[project]
+name = "syncaudio"
+version = "0.1.0"
+description = "Synchronise des pistes audio multilingues en s'appuyant sur la musique et les bruitages communs"
+readme = "README.md"
+authors = [
+    { name = "Marc Valat", email = "marc.valat@hotmail.fr" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "click>=8.4.2",
+    "imageio-ffmpeg>=0.6.0",
+    "numpy>=2.5.1",
+    "scipy>=1.18.0",
+]
+
+[project.scripts]
+syncaudio = "syncaudio.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
