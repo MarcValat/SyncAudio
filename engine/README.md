@@ -70,6 +70,9 @@ Autres options utiles :
 - `--audio-only` : exporte uniquement la/les piste(s) corrigée(s) en `.flac` (`<sortie>.<fichier>.trackN.flac`) au lieu de remuxer un MKV complet.
 - `-o/--output` : chemin de sortie (défaut : `<INPUT>.synced.mkv`).
 - `--only-imports` : n'inclut aucune piste de INPUT à part la référence (utile avec `--import-audio`/`--import-subs` ci-dessous, pour ne pas dupliquer une piste déjà présente dans INPUT).
+- `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
+
+Comme `align`, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent (voir `segments` ci-dessous pour détecter ces cas ; leur correction n'est pas encore implémentée).
 
 ### Injecter des pistes d'un autre fichier
 
@@ -96,12 +99,14 @@ Affiche un ou plusieurs segments, chacun avec un décalage de début/fin :
 - valeurs différentes → **dérive** progressive sur ce segment (vitesse légèrement différente ; la correction — time-stretch — n'est pas encore implémentée).
 - plusieurs segments avec un saut net entre eux → montage différent à cet instant (correction par segment — pas encore implémentée non plus).
 
+Quand plusieurs segments sont détectés, chaque frontière est automatiquement raffinée par une seconde passe locale (fenêtre bien plus petite, uniquement autour de la transition) pour la localiser plus précisément que la passe grossière seule.
+
 Options : `--window`/`--hop` (taille/pas de la fenêtre glissante, secondes), `--margin` (décalage local max recherché par fenêtre), `--json` (sortie machine, fenêtres brutes + segments classifiés), `--start`/`--duration` comme pour `align`.
 
-Limites connues à ce stade : la précision de localisation d'un saut est de l'ordre de la taille de fenêtre (`--window`, 30s par défaut) ; sur des cas avec plusieurs sauts rapprochés, un segment isolé parasite peut occasionnellement apparaître près d'une transition (vu sur nos fixtures de test, cas `jump_multi`). `segments` ne fait que détecter — `render` ne sait pour l'instant corriger que le cas décalage constant.
-- `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
-
-Comme `align`, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent (voir « Limites connues » plus haut ; la détection de dérive/sauts est prévue pour une prochaine version).
+Limites connues à ce stade :
+- La précision de localisation d'un saut dépend de la richesse en musique/bruitages du contenu *juste autour* de la transition, pas seulement de la taille de fenêtre : sur une zone plutôt silencieuse/dialoguée à cet instant précis, même la passe de raffinement peut rester à plusieurs secondes de l'instant réel (vu sur `jump_single`, un cas par ailleurs propre).
+- Sur des cas avec plusieurs sauts rapprochés, un segment isolé parasite peut occasionnellement apparaître près d'une transition (vu sur `jump_multi`).
+- `segments` ne fait que détecter — `render` ne sait pour l'instant corriger que le cas décalage constant.
 
 ### Accélérer sur de gros fichiers
 
