@@ -1,0 +1,82 @@
+{
+  "source": "C:\\Users\\marcv\\Desktop\\Dossiers\\Projects\\syncaudio\\testfile.mkv",
+  "window": {
+    "start_s": 0.0,
+    "duration_s": 360.0
+  },
+  "reference_track": 0,
+  "candidate_track": 1,
+  "offset_sign_convention": "positif = la candidate est en retard sur la reference",
+  "fixtures": [
+    {
+      "file": "sync_base.mkv",
+      "description": "Temoin : aucune desynchronisation (sanity check, offset attendu = 0).",
+      "breakpoints": [],
+      "stretch_factor": null
+    },
+    {
+      "file": "offset_const_plus.mkv",
+      "description": "Decalage constant : la candidate est en retard de 5s des le debut.",
+      "breakpoints": [
+        {
+          "time_s": 0.0,
+          "delta_s": 5.0
+        }
+      ],
+      "stretch_factor": null
+    },
+    {
+      "file": "offset_const_minus.mkv",
+      "description": "Decalage constant : la candidate est en avance de 3s des le debut.",
+      "breakpoints": [
+        {
+          "time_s": 0.0,
+          "delta_s": -3.0
+        }
+      ],
+      "stretch_factor": null
+    },
+    {
+      "file": "jump_single.mkv",
+      "description": "Synchro au debut, puis un saut net de +4s a t=150s.",
+      "breakpoints": [
+        {
+          "time_s": 150.0,
+          "delta_s": 4.0
+        }
+      ],
+      "stretch_factor": null
+    },
+    {
+      "file": "jump_multi.mkv",
+      "description": "Plusieurs sauts a des instants pseudo-aleatoires (seed=1234).",
+      "breakpoints": [
+        {
+          "time_s": 47.02269691581854,
+          "delta_s": -2.6789087037199626
+        },
+        {
+          "time_s": 163.99780177734522,
+          "delta_s": -1.2460551218405538
+        },
+        {
+          "time_s": 305.94245463687747,
+          "delta_s": 1.5920244384077944
+        }
+      ],
+      "stretch_factor": null
+    },
+    {
+      "file": "drift_slower.mkv",
+      "description": "Derive progressive : la candidate tourne 1% plus lentement (retard croissant).",
+      "breakpoints": [],
+      "stretch_factor": 1.01
+    },
+    {
+      "file": "drift_faster.mkv",
+      "description": "Derive progressive : la candidate tourne 1% plus vite (avance croissante).",
+      "breakpoints": [],
+      "stretch_factor": 0.99
+    }
+  ]
+}
