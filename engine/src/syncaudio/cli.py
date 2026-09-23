@@ -18,6 +18,7 @@ from syncaudio.segments import (
     DEFAULT_MARGIN_S,
     DEFAULT_WINDOW_S,
     classify_segments,
+    refine_segments,
     windowed_offsets,
 )
 
@@ -372,6 +373,9 @@ def segments(
     _log("[analyse] fenêtres glissantes...", quiet)
     windows = windowed_offsets(ref_env, cand_env, frame_rate, window_s=window_s, hop_s=hop_s, margin_s=margin_s)
     segs = classify_segments(windows, total_duration_s)
+    if len(segs) > 1:
+        _log("[analyse] affinage des frontières...", quiet)
+        segs = refine_segments(ref_env, cand_env, frame_rate, segs)
 
     if as_json:
         payload = {

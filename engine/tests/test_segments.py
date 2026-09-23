@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from syncaudio.features import extract_envelope
-from syncaudio.segments import classify_segments, windowed_offsets
+from syncaudio.segments import classify_segments, refine_segments, windowed_offsets
 
 SAMPLE_RATE = 16000
 
@@ -105,7 +105,14 @@ def test_classify_segments_detects_a_jump() -> None:
     assert len(segments) == 2
     assert abs(segments[0].mean_offset - 0.0) < 0.3
     assert abs(segments[1].mean_offset - delta_s) < 0.3
-    assert abs(segments[0].end_s - jump_time_s) < 20.0  # boundary precision is on the order of window_s
+    coarse_error = abs(segments[0].end_s - jump_time_s)
+    assert coarse_error < 20.0  # boundary precision is on the order of window_s
+
+    refined = refine_segments(ref_env, cand_env, frame_rate, segments)
+    assert len(refined) == 2
+    refined_error = abs(refined[0].end_s - jump_time_s)
+    assert refined_error < 5.0
+    assert refined_error <= coarse_error
 
 
 def test_classify_segments_detects_drift() -> None:
