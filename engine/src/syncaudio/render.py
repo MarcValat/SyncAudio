@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,10 +13,12 @@ from syncaudio.ffmpeg_backend import (
     extract_pcm,
     probe_audio_streams,
     probe_duration,
+    probe_subtitle_codec,
     resolve_ffmpeg,
 )
 from syncaudio.models import AudioTrackSpec
 from syncaudio.segments import DEFAULT_HOP_S, DEFAULT_MARGIN_S, DEFAULT_WINDOW_S, Segment, detect_segments
+from syncaudio.subtitles import format_for_codec, shift_subtitle_text
 
 # Below this, a detected offset is treated as measurement noise and left
 # uncorrected (skips an unneeded re-encode): real-content correlation
@@ -217,6 +220,29 @@ def _run(cmd: list[str]) -> None:
         raise FFmpegError(f"Échec ffmpeg :\n{' '.join(cmd)}\n{proc.stderr.decode(errors='replace')}")
 
 
+def _prepare_shifted_subtitle_file(ffmpeg: str, spec: AudioTrackSpec, segments: Sequence[Segment], tmp_dir: Path) -> Path:
+    """Extract a subtitle track, rewrite every cue's timestamp per ``segments``, and return the new file.
+
+    Unlike a flat offset (a single ``-itsoffset`` on the input), a segmented
+    correction can shift different cues by different amounts (drift, jumps),
+    so there's no way around actually rewriting the file's timestamps.
+    """
+    idx = _stream_index(spec)
+    codec = probe_subtitle_codec(spec.path, idx)
+    fmt = format_for_codec(codec)
+    extracted = tmp_dir / f"extracted_{idx}.{fmt}"
+    _run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", spec.path, "-map", f"0:s:{idx}", "-c:s", "copy", str(extracted),
+        ]
+    )
+    shifted_text = shift_subtitle_text(extracted.read_text(encoding="utf-8"), segments, fmt)
+    shifted = tmp_dir / f"shifted_{idx}.{fmt}"
+    shifted.write_text(shifted_text, encoding="utf-8")
+    return shifted
+
+
 def render(
     input_path: str,
     reference_index: int,
@@ -226,6 +252,7 @@ def render(
     audio_only: bool = False,
     imported_subs: Sequence[tuple[AudioTrackSpec, float]] = (),
     segmented_corrections: Sequence[SegmentedTrackCorrection] = (),
+    segmented_imported_subs: Sequence[tuple[AudioTrackSpec, list[Segment]]] = (),
 ) -> list[str]:
     """Apply ``corrections`` and write the result.
 
@@ -241,7 +268,11 @@ def render(
     subtitle stream) and added as extra subtitle tracks. ``segmented_corrections``
     are tracks with a non-constant offset (drift and/or jumps, from
     ``plan_segmented_correction``), applied with ``segment_correction_filter``
-    instead of the plain constant-offset ``correction_filter``.
+    instead of the plain constant-offset ``correction_filter``. ``segmented_imported_subs``
+    is the segmented counterpart of ``imported_subs``: a list of (subtitle
+    track, segments) pairs whose cue timestamps are individually rewritten
+    (not just globally offset) to follow the same per-segment correction as
+    their paired audio.
 
     With ``audio_only``, writes one corrected ``.flac`` per entry of
     ``corrections``/``segmented_corrections`` next to ``output_path`` (named
@@ -338,13 +369,21 @@ def render(
         inputs.append(["-itsoffset", f"{-offset:.6f}", "-i", spec.path])
         sub_map_args += ["-map", f"{new_idx}:s:{idx}"]
 
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
-    for inp in inputs:
-        cmd += inp
-    if filter_complex_parts:
-        cmd += ["-filter_complex", ";".join(filter_complex_parts)]
-    cmd += ["-map", "0:v:0", *audio_map_args, "-map", "0:s?", "-map", "0:t?", *sub_map_args]
-    cmd += ["-c:v", "copy", *audio_codec_args, "-c:s", "copy", *metadata_args]
-    cmd += ["-t", str(ref_duration), output_path]
-    _run(cmd)
+    with tempfile.TemporaryDirectory(prefix="syncaudio-subs-") as tmp_dir_name:
+        tmp_dir = Path(tmp_dir_name)
+        for spec, segs in segmented_imported_subs:
+            shifted = _prepare_shifted_subtitle_file(ffmpeg, spec, segs, tmp_dir)
+            new_idx = len(inputs)
+            inputs.append(["-i", str(shifted)])
+            sub_map_args += ["-map", f"{new_idx}:s:0"]
+
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        for inp in inputs:
+            cmd += inp
+        if filter_complex_parts:
+            cmd += ["-filter_complex", ";".join(filter_complex_parts)]
+        cmd += ["-map", "0:v:0", *audio_map_args, "-map", "0:s?", "-map", "0:t?", *sub_map_args]
+        cmd += ["-c:v", "copy", *audio_codec_args, "-c:s", "copy", *metadata_args]
+        cmd += ["-t", str(ref_duration), output_path]
+        _run(cmd)
     return [output_path]

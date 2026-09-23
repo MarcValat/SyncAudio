@@ -17,6 +17,7 @@ from syncaudio.segments import (
     DEFAULT_HOP_S,
     DEFAULT_MARGIN_S,
     DEFAULT_WINDOW_S,
+    Segment,
     classify_segments,
     refine_segments,
     windowed_offsets,
@@ -194,7 +195,7 @@ def align(
     is_flag=True,
     help=(
         "Corrige aussi la dérive progressive et les sauts nets, pas seulement un décalage constant "
-        "(voir `segments` pour visualiser d'abord ce qui sera fait). Incompatible avec --import-subs pour l'instant."
+        "(voir `segments` pour visualiser d'abord ce qui sera fait)."
     ),
 )
 @click.option("--window", "window_s", default=DEFAULT_WINDOW_S, show_default=True, help="Avec --segmented : taille de fenêtre d'analyse (s).")
@@ -290,9 +291,6 @@ def render(
             "--import-subs nécessite exactement un --import-audio, pour en déduire le décalage à appliquer aux sous-titres."
         )
 
-    if segmented and import_subs_specs:
-        raise click.ClickException("--segmented ne peut pas encore être combiné avec --import-subs.")
-
     reference_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
     same_file_specs = [AudioTrackSpec(raw=f"{input_path}@{i}", path=input_path, stream_index=i) for i in targets]
     candidates = same_file_specs + import_audio_specs
@@ -324,6 +322,13 @@ def render(
                     f"offset {seg.offset_start:+7.3f}s -> {seg.offset_end:+7.3f}s"
                 )
 
+        segmented_imported_subs: list[tuple[AudioTrackSpec, list[Segment]]] = []
+        if import_subs_specs:
+            subs_segments = seg_corrections[len(same_file_specs)].segments
+            segmented_imported_subs = [(spec, subs_segments) for spec in import_subs_specs]
+            for spec in import_subs_specs:
+                click.echo(f"  {spec.raw:<30} (sous-titres)  horodatages réécrits selon les mêmes segments que l'audio importé")
+
         if dry_run:
             click.echo("[dry-run] rien écrit.")
             return
@@ -342,6 +347,7 @@ def render(
                 output_path=output_path,
                 audio_only=audio_only,
                 segmented_corrections=seg_corrections,
+                segmented_imported_subs=segmented_imported_subs,
             )
         except FFmpegError as exc:
             raise click.ClickException(str(exc)) from exc

@@ -121,7 +121,7 @@ Pour chaque segment, la portion correspondante de la piste candidate (son propre
 
 Sur nos fixtures de test : une dérive de +3.4s en fin de piste retombe à un résidu quasi constant (~0.2s) après correction ; un saut nettement détecté (même avec une frontière imprécise de quelques secondes) redonne un flux parfaitement synchro après correction, l'imprécision de frontière n'affectant qu'une poignée de secondes autour de la transition elle-même.
 
-Limite actuelle : `--segmented` ne peut pas encore se combiner avec `--import-subs` (le décalage des sous-titres importés se déduit aujourd'hui d'un décalage constant unique).
+`--segmented` se combine aussi avec `--import-subs` : les horodatages de chaque réplique sont individuellement réécrits selon le segment auquel ils appartiennent (pas un simple décalage global comme en mode non-segmenté), donc une réplique après un saut ou en pleine dérive atterrit correctement. Formats de sous-titres supportés : SRT et ASS/SSA (les plus courants) ; un autre format donne une erreur claire plutôt qu'un résultat silencieusement faux.
 
 ### Accélérer sur de gros fichiers
 

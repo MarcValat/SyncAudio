@@ -14,6 +14,7 @@ _STREAM_RE = re.compile(
     r"(?P<codec>[^,]+),\s*(?P<rate>\d+)\s*Hz,\s*(?P<channels>[^,]+)"
 )
 _DURATION_RE = re.compile(r"Duration:\s*(?P<h>\d+):(?P<m>\d+):(?P<s>\d+(?:\.\d+)?)")
+_SUBTITLE_STREAM_RE = re.compile(r"^\s*Stream #\d+:(?P<index>\d+)(?:\([^)]+\))?:\s*Subtitle:\s*(?P<codec>\S+)")
 
 
 class FFmpegError(RuntimeError):
@@ -103,6 +104,20 @@ def probe_duration(path: str) -> float:
     if not match:
         raise FFmpegError(f"Impossible de déterminer la durée de {path!r}.")
     return int(match["h"]) * 3600 + int(match["m"]) * 60 + float(match["s"])
+
+
+def probe_subtitle_codec(path: str, index: int) -> str:
+    """Return the codec name (e.g. ``subrip``, ``ass``) of subtitle stream ``index`` in ``path``."""
+    ffmpeg = resolve_ffmpeg()
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path],
+        capture_output=True,
+        text=True,
+    )
+    subtitle_streams = [m for line in proc.stderr.splitlines() if (m := _SUBTITLE_STREAM_RE.match(line))]
+    if index >= len(subtitle_streams):
+        raise FFmpegError(f"Piste de sous-titres @{index} absente de {path!r} ({len(subtitle_streams)} trouvée(s)).")
+    return subtitle_streams[index]["codec"]
 
 
 _CHANNEL_LAYOUTS = {
