@@ -82,6 +82,23 @@ uv run syncaudio render vo.mkv --reference 0 --only-imports \
 ```
 
 `--import-audio` (répétable) ajoute une piste audio d'un autre fichier, décalage détecté et corrigé automatiquement comme pour `--track`. `--import-subs` (répétable) ajoute une piste de sous-titres d'un autre fichier : contrairement à l'audio, on ne peut pas « couper »/« combler » du texte, donc ses horodatages sont simplement translatés du même montant que le décalage audio détecté — ce qui impose d'avoir **exactement un** `--import-audio` pour en déduire ce décalage (aucune détection séparée pour les sous-titres seuls pour l'instant).
+
+## Détecter une dérive ou des sauts (`segments`)
+
+`align` et `render` supposent un décalage **constant** sur toute la piste. `segments` lève cette hypothèse : il fait glisser une fenêtre d'analyse sur toute la piste et rapporte comment le décalage évolue dans le temps, sans rien corriger ni écrire :
+
+```
+uv run syncaudio segments film.mkv --reference 0 --track 1
+```
+
+Affiche un ou plusieurs segments, chacun avec un décalage de début/fin :
+- même valeur aux deux bouts → décalage **constant** sur ce segment (ce que `render` sait déjà corriger).
+- valeurs différentes → **dérive** progressive sur ce segment (vitesse légèrement différente ; la correction — time-stretch — n'est pas encore implémentée).
+- plusieurs segments avec un saut net entre eux → montage différent à cet instant (correction par segment — pas encore implémentée non plus).
+
+Options : `--window`/`--hop` (taille/pas de la fenêtre glissante, secondes), `--margin` (décalage local max recherché par fenêtre), `--json` (sortie machine, fenêtres brutes + segments classifiés), `--start`/`--duration` comme pour `align`.
+
+Limites connues à ce stade : la précision de localisation d'un saut est de l'ordre de la taille de fenêtre (`--window`, 30s par défaut) ; sur des cas avec plusieurs sauts rapprochés, un segment isolé parasite peut occasionnellement apparaître près d'une transition (vu sur nos fixtures de test, cas `jump_multi`). `segments` ne fait que détecter — `render` ne sait pour l'instant corriger que le cas décalage constant.
 - `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
 
 Comme `align`, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent (voir « Limites connues » plus haut ; la détection de dérive/sauts est prévue pour une prochaine version).

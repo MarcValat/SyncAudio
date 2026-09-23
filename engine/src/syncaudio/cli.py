@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import time
@@ -12,6 +13,13 @@ from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import FFmpegError, extract_pcm, parse_track_spec, probe_audio_streams
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import plan_corrections, render as render_tracks
+from syncaudio.segments import (
+    DEFAULT_HOP_S,
+    DEFAULT_MARGIN_S,
+    DEFAULT_WINDOW_S,
+    classify_segments,
+    windowed_offsets,
+)
 
 
 def _log(message: str, quiet: bool) -> None:
@@ -306,6 +314,82 @@ def render(
 
     for path in written:
         click.echo(f"Écrit : {path}")
+
+
+@cli.command()
+@click.argument("input_path", metavar="INPUT")
+@click.option("--reference", "reference_index", required=True, type=int, help="Index de la piste de référence.")
+@click.option("--track", "track_index", required=True, type=int, help="Index de la piste à analyser.")
+@click.option("--window", "window_s", default=DEFAULT_WINDOW_S, show_default=True, help="Taille de fenêtre d'analyse (s).")
+@click.option("--hop", "hop_s", default=DEFAULT_HOP_S, show_default=True, help="Pas entre fenêtres successives (s).")
+@click.option(
+    "--margin",
+    "margin_s",
+    default=DEFAULT_MARGIN_S,
+    show_default=True,
+    help="Décalage local maximum recherché autour de zéro, par fenêtre (s).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Sortie au format JSON (fenêtres + segments).")
+@click.option("--start", default=0.0, show_default=True, help="Ignore les START premières secondes de chaque piste.")
+@click.option("--duration", default=None, type=float, help="N'analyse que les DURATION secondes suivant --start.")
+@click.option("-q", "--quiet", is_flag=True, help="Ne pas afficher la progression sur stderr.")
+def segments(
+    input_path: str,
+    reference_index: int,
+    track_index: int,
+    window_s: float,
+    hop_s: float,
+    margin_s: float,
+    as_json: bool,
+    start: float,
+    duration: float | None,
+    quiet: bool,
+) -> None:
+    """Détecte comment le décalage entre --track et --reference change dans le temps.
+
+    Contrairement à `align` (un seul décalage global) et `render` (le
+    corrige en le supposant constant), `segments` révèle une dérive
+    progressive ou des sauts nets — utile pour comprendre CE cas avant de
+    décider comment le corriger. Ne modifie ni n'écrit aucun fichier.
+    """
+    sample_rate = 16000
+    try:
+        ref_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
+        track_spec = AudioTrackSpec(raw=f"{input_path}@{track_index}", path=input_path, stream_index=track_index)
+
+        _log(f"[extraction] référence @{reference_index} ...", quiet)
+        ref_pcm = extract_pcm(ref_spec, sample_rate=sample_rate, start=start or None, duration=duration)
+        ref_env, frame_rate = extract_envelope(ref_pcm, sample_rate)
+
+        _log(f"[extraction] piste @{track_index} ...", quiet)
+        cand_pcm = extract_pcm(track_spec, sample_rate=sample_rate, start=start or None, duration=duration)
+        cand_env, _ = extract_envelope(cand_pcm, sample_rate)
+    except FFmpegError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    total_duration_s = len(ref_pcm) / sample_rate
+
+    _log("[analyse] fenêtres glissantes...", quiet)
+    windows = windowed_offsets(ref_env, cand_env, frame_rate, window_s=window_s, hop_s=hop_s, margin_s=margin_s)
+    segs = classify_segments(windows, total_duration_s)
+
+    if as_json:
+        payload = {
+            "reference": ref_spec.raw,
+            "track": track_spec.raw,
+            "total_duration_s": total_duration_s,
+            "windows": [dataclasses.asdict(w) for w in windows],
+            "segments": [dict(dataclasses.asdict(s), is_drift=s.is_drift) for s in segs],
+        }
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    click.echo(f"Référence : {ref_spec.raw}  |  Piste : {track_spec.raw}  ({total_duration_s:.1f}s analysées)")
+    for s in segs:
+        kind = "dérive  " if s.is_drift else "constant"
+        click.echo(
+            f"  [{s.start_s:7.1f}s -> {s.end_s:7.1f}s]  {kind}  offset {s.offset_start:+7.3f}s -> {s.offset_end:+7.3f}s"
+        )
 
 
 def main() -> None:
