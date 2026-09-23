@@ -9,7 +9,8 @@ import pytest
 
 from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
-from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, resolve_ffmpeg
+from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, resolve_ffmpeg
+from syncaudio.models import AudioTrackSpec
 from syncaudio.render import correction_filter, plan_corrections, render
 
 
@@ -51,6 +52,10 @@ def _write_wav(path: Path, data: np.ndarray, sr: int) -> None:
         f.writeframes(samples.tobytes())
 
 
+def _spec(path: Path | str, index: int) -> AudioTrackSpec:
+    return AudioTrackSpec(raw=f"{path}@{index}", path=str(path), stream_index=index)
+
+
 @pytest.fixture()
 def offset_mkv(tmp_path: Path) -> tuple[Path, float]:
     """A 2-track mkv (dummy video + reference + candidate lagging by 3s)."""
@@ -83,11 +88,11 @@ def offset_mkv(tmp_path: Path) -> tuple[Path, float]:
 
 def test_plan_corrections_recovers_injected_offset(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
-    corrections = plan_corrections(str(mkv), reference_index=0, track_indices=[1])
+    corrections = plan_corrections(_spec(mkv, 0), [_spec(mkv, 1)])
 
     assert len(corrections) == 1
     corr = corrections[0]
-    assert corr.index == 1
+    assert corr.track.stream_index == 1
     assert corr.language == "fre"
     assert abs(corr.offset_seconds - offset_s) < 0.05
     assert corr.needs_correction
@@ -96,7 +101,7 @@ def test_plan_corrections_recovers_injected_offset(offset_mkv: tuple[Path, float
 def test_render_corrects_offset_close_to_zero_residual(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
     input_path = str(mkv)
-    corrections = plan_corrections(input_path, reference_index=0, track_indices=[1])
+    corrections = plan_corrections(_spec(mkv, 0), [_spec(mkv, 1)])
 
     output_path = str(mkv.with_name("out.synced.mkv"))
     written = render(input_path, reference_index=0, corrections=corrections, output_path=output_path)
@@ -116,11 +121,108 @@ def test_render_corrects_offset_close_to_zero_residual(offset_mkv: tuple[Path, f
 def test_render_audio_only_exports_corrected_track(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
     input_path = str(mkv)
-    corrections = plan_corrections(input_path, reference_index=0, track_indices=[1])
+    corrections = plan_corrections(_spec(mkv, 0), [_spec(mkv, 1)])
 
     output_path = str(mkv.with_name("out.synced.mkv"))
     written = render(input_path, reference_index=0, corrections=corrections, output_path=output_path, audio_only=True)
 
     assert len(written) == 1
-    assert written[0].endswith("out.synced.track1.flac")
+    assert written[0].endswith(f"out.synced.{mkv.stem}.track1.flac")
     assert Path(written[0]).exists()
+
+
+def _write_srt(path: Path, start_s: float, end_s: float, text: str = "Hello") -> None:
+    def fmt(t: float) -> str:
+        h, rem = divmod(t, 3600)
+        m, s = divmod(rem, 60)
+        return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{round((s - int(s)) * 1000):03d}"
+
+    path.write_text(f"1\n{fmt(start_s)} --> {fmt(end_s)}\n{text}\n", encoding="utf-8")
+
+
+@pytest.fixture()
+def cross_file_fixture(tmp_path: Path) -> tuple[Path, Path, float, float]:
+    """A reference-only mkv, plus a separate donor mkv (audio + subtitle) lagging by 3s."""
+    sr = 44100
+    duration_s = 30.0
+    offset_s = 3.0
+    cue_start_s = 10.0  # timed against the donor's own (pre-correction) audio
+
+    bed = _make_bed(duration_s, sr, seed=7)
+    silence = np.zeros(int(offset_s * sr))
+    shifted = np.concatenate([silence, bed])[: len(bed)]
+
+    ref_wav = tmp_path / "ref.wav"
+    donor_wav = tmp_path / "donor.wav"
+    _write_wav(ref_wav, bed, sr)
+    _write_wav(donor_wav, shifted, sr)
+
+    ffmpeg = resolve_ffmpeg()
+    ref_mkv = tmp_path / "reference.mkv"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav),
+            "-map", "0:v", "-map", "1:a",
+            "-metadata:s:a:0", "language=jpn",
+            "-shortest", str(ref_mkv),
+        ],
+        check=True, capture_output=True,
+    )
+
+    srt_path = tmp_path / "donor.srt"
+    _write_srt(srt_path, cue_start_s, cue_start_s + 2.0)
+
+    donor_mkv = tmp_path / "donor.mkv"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(donor_wav), "-i", str(srt_path),
+            "-map", "0:a", "-map", "1:s",
+            "-metadata:s:a:0", "language=fre",
+            str(donor_mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    return ref_mkv, donor_mkv, offset_s, cue_start_s
+
+
+def test_render_imports_audio_and_subs_from_another_file(cross_file_fixture: tuple[Path, Path, float, float]) -> None:
+    ref_mkv, donor_mkv, offset_s, cue_start_s = cross_file_fixture
+
+    donor_audio = _spec(donor_mkv, 0)
+    donor_subs = _spec(donor_mkv, 0)
+
+    corrections = plan_corrections(_spec(ref_mkv, 0), [donor_audio])
+    assert len(corrections) == 1
+    assert abs(corrections[0].offset_seconds - offset_s) < 0.05
+
+    output_path = str(ref_mkv.with_name("out.synced.mkv"))
+    written = render(
+        str(ref_mkv),
+        reference_index=0,
+        corrections=corrections,
+        output_path=output_path,
+        imported_subs=[(donor_subs, corrections[0].offset_seconds)],
+    )
+    assert written == [output_path]
+
+    audio_streams = probe_audio_streams(output_path)
+    assert len(audio_streams) == 2
+    assert {s.language for s in audio_streams} == {"jpn", "fre"}
+
+    ffmpeg = resolve_ffmpeg()
+    extracted_srt = ref_mkv.with_name("out.extracted.srt")
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", output_path, "-map", "0:s:0", str(extracted_srt)],
+        check=True, capture_output=True,
+    )
+    lines = extracted_srt.read_text(encoding="utf-8").splitlines()
+    start_str = lines[1].split(" --> ")[0]
+    h, m, rest = start_str.split(":")
+    s, ms = rest.split(",")
+    actual_start = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    expected_start = cue_start_s - offset_s  # subtitles shift the same way the audio was corrected
+    assert abs(actual_start - expected_start) < 0.1

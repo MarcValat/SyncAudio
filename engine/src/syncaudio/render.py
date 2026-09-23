@@ -24,9 +24,13 @@ _NO_CORRECTION_THRESHOLD_S = 0.05
 _ANALYSIS_SAMPLE_RATE = 16000
 
 
+def _stream_index(spec: AudioTrackSpec) -> int:
+    return spec.stream_index if spec.stream_index is not None else 0
+
+
 @dataclass(frozen=True)
 class TrackCorrection:
-    index: int
+    track: AudioTrackSpec
     language: str | None
     offset_seconds: float
     confidence: float
@@ -57,36 +61,44 @@ def correction_filter(offset_seconds: float) -> str | None:
     return f"adelay={delay_ms:.3f}:all=1,apad"
 
 
-def _analyze(input_path: str, index: int, start: float, duration: float | None) -> tuple:
-    spec = AudioTrackSpec(raw=f"{input_path}@{index}", path=input_path, stream_index=index)
+def _analyze(spec: AudioTrackSpec, start: float, duration: float | None) -> tuple:
     pcm = extract_pcm(spec, sample_rate=_ANALYSIS_SAMPLE_RATE, start=start or None, duration=duration)
     return extract_envelope(pcm, _ANALYSIS_SAMPLE_RATE)
 
 
 def plan_corrections(
-    input_path: str,
-    reference_index: int,
-    track_indices: Sequence[int],
+    reference: AudioTrackSpec,
+    candidates: Sequence[AudioTrackSpec],
     *,
     start: float = 0.0,
     duration: float | None = None,
     log: Callable[[str], None] = lambda msg: None,
 ) -> list[TrackCorrection]:
-    """Detect the constant offset of each of ``track_indices`` vs. the reference."""
-    streams = {s.index: s for s in probe_audio_streams(input_path)}
+    """Detect the constant offset of each of ``candidates`` vs. ``reference``.
 
-    log(f"[analyse] reference @{reference_index} ...")
-    ref_env, frame_rate = _analyze(input_path, reference_index, start, duration)
+    ``reference`` and each of ``candidates`` may point at different files --
+    this is what lets ``render`` mix tracks from a second, "donor" file in
+    with a primary one.
+    """
+    lang_cache: dict[str, dict[int, str | None]] = {}
+
+    def language_of(spec: AudioTrackSpec) -> str | None:
+        if spec.path not in lang_cache:
+            lang_cache[spec.path] = {s.index: s.language for s in probe_audio_streams(spec.path)}
+        return lang_cache[spec.path].get(_stream_index(spec))
+
+    log(f"[analyse] reference {reference.raw} ...")
+    ref_env, frame_rate = _analyze(reference, start, duration)
 
     corrections = []
-    for idx in track_indices:
-        log(f"[analyse] piste @{idx} ...")
-        env, _ = _analyze(input_path, idx, start, duration)
+    for spec in candidates:
+        log(f"[analyse] piste {spec.raw} ...")
+        env, _ = _analyze(spec, start, duration)
         estimate = estimate_offset(ref_env, env, frame_rate)
         corrections.append(
             TrackCorrection(
-                index=idx,
-                language=streams[idx].language if idx in streams else None,
+                track=spec,
+                language=language_of(spec),
                 offset_seconds=estimate.offset_seconds,
                 confidence=estimate.confidence,
                 ambiguous=estimate.ambiguous,
@@ -108,28 +120,40 @@ def render(
     output_path: str,
     *,
     audio_only: bool = False,
+    imported_subs: Sequence[tuple[AudioTrackSpec, float]] = (),
 ) -> list[str]:
     """Apply ``corrections`` and write the result.
 
+    ``input_path`` supplies the video (and, unless overridden by
+    ``corrections``, everything else): it is always input 0 and always
+    provides the reference audio, subtitles and attachments untouched. Each
+    entry of ``corrections`` may point at ``input_path`` itself (the original
+    single-file use case) or at a different "donor" file, in which case that
+    file is added as an extra ffmpeg input and its corrected track is mixed
+    in. ``imported_subs`` is a list of (subtitle track, offset_seconds) pairs
+    from donor files, shifted by ``-offset_seconds`` (a pure timestamp shift,
+    unlike audio's trim/pad -- there's no audio content to cut or pad in a
+    subtitle stream) and added as extra subtitle tracks.
+
     With ``audio_only``, writes one corrected ``.flac`` per entry of
-    ``corrections`` next to ``output_path`` (named after its stem) instead of
-    a remuxed container, and returns their paths. Otherwise remuxes into a
-    single MKV -- video, subtitles and attachments copied untouched, the
-    reference audio copied untouched, corrected tracks re-encoded to flac --
-    capped to the reference's duration, and returns ``[output_path]``.
+    ``corrections`` next to ``output_path`` (named after its stem and source
+    file) instead of a remuxed container, and returns their paths. Otherwise
+    remuxes into a single MKV -- corrected tracks re-encoded to flac,
+    everything else stream-copied -- capped to the reference's duration, and
+    returns ``[output_path]``.
     """
     ffmpeg = resolve_ffmpeg()
-    streams = {s.index: s for s in probe_audio_streams(input_path)}
     ref_duration = probe_duration(input_path)
 
     if audio_only:
         out_base = Path(output_path)
         written = []
         for corr in corrections:
+            idx = _stream_index(corr.track)
             filt = correction_filter(corr.offset_seconds)
-            track_out = out_base.with_name(f"{out_base.stem}.track{corr.index}.flac")
-            cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", input_path]
-            cmd += ["-map", f"0:a:{corr.index}"]
+            donor = Path(corr.track.path).stem
+            track_out = out_base.with_name(f"{out_base.stem}.{donor}.track{idx}.flac")
+            cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", corr.track.path, "-map", f"0:a:{idx}"]
             if filt:
                 cmd += ["-af", filt]
             cmd += ["-t", str(ref_duration), str(track_out)]
@@ -137,33 +161,54 @@ def render(
             written.append(str(track_out))
         return written
 
-    corrected_by_index = {c.index: c for c in corrections}
-    audio_track_order = [reference_index] + sorted(corrected_by_index)
+    streams_ref = {s.index: s for s in probe_audio_streams(input_path)}
 
-    filter_complex_parts = []
-    map_args: list[str] = []
-    codec_args: list[str] = []
+    inputs: list[list[str]] = [["-i", input_path]]
+    input_index_for_path: dict[str, int] = {input_path: 0}
+
+    def input_index_for(path: str) -> int:
+        if path not in input_index_for_path:
+            input_index_for_path[path] = len(inputs)
+            inputs.append(["-i", path])
+        return input_index_for_path[path]
+
+    filter_complex_parts: list[str] = []
+    audio_map_args = ["-map", f"0:a:{reference_index}"]
+    audio_codec_args = ["-c:a:0", "copy"]
     metadata_args: list[str] = []
-    for pos, idx in enumerate(audio_track_order):
-        corr = corrected_by_index.get(idx)
-        filt = correction_filter(corr.offset_seconds) if corr else None
-        if filt:
-            label = f"a{idx}"
-            filter_complex_parts.append(f"[0:a:{idx}]{filt}[{label}]")
-            map_args += ["-map", f"[{label}]"]
-            codec_args += [f"-c:a:{pos}", "flac"]
-        else:
-            map_args += ["-map", f"0:a:{idx}"]
-            codec_args += [f"-c:a:{pos}", "copy"]
-        lang = streams[idx].language if idx in streams else None
-        if lang:
-            metadata_args += [f"-metadata:s:a:{pos}", f"language={lang}"]
+    if reference_index in streams_ref and streams_ref[reference_index].language:
+        metadata_args += ["-metadata:s:a:0", f"language={streams_ref[reference_index].language}"]
 
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", input_path]
+    for pos, corr in enumerate(corrections, start=1):
+        spec = corr.track
+        idx = _stream_index(spec)
+        in_idx = input_index_for(spec.path)
+        filt = correction_filter(corr.offset_seconds)
+        if filt:
+            label = f"a{pos}"
+            filter_complex_parts.append(f"[{in_idx}:a:{idx}]{filt}[{label}]")
+            audio_map_args += ["-map", f"[{label}]"]
+            audio_codec_args += [f"-c:a:{pos}", "flac"]
+        else:
+            audio_map_args += ["-map", f"{in_idx}:a:{idx}"]
+            audio_codec_args += [f"-c:a:{pos}", "copy"]
+        if corr.language:
+            metadata_args += [f"-metadata:s:a:{pos}", f"language={corr.language}"]
+
+    sub_map_args: list[str] = []
+    for spec, offset in imported_subs:
+        idx = _stream_index(spec)
+        new_idx = len(inputs)
+        inputs.append(["-itsoffset", f"{-offset:.6f}", "-i", spec.path])
+        sub_map_args += ["-map", f"{new_idx}:s:{idx}"]
+
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+    for inp in inputs:
+        cmd += inp
     if filter_complex_parts:
         cmd += ["-filter_complex", ";".join(filter_complex_parts)]
-    cmd += ["-map", "0:v:0", *map_args, "-map", "0:s?", "-map", "0:t?"]
-    cmd += ["-c:v", "copy", *codec_args, "-c:s", "copy", *metadata_args]
+    cmd += ["-map", "0:v:0", *audio_map_args, "-map", "0:s?", "-map", "0:t?", *sub_map_args]
+    cmd += ["-c:v", "copy", *audio_codec_args, "-c:s", "copy", *metadata_args]
     cmd += ["-t", str(ref_duration), output_path]
     _run(cmd)
     return [output_path]
