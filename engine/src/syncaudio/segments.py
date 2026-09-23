@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from syncaudio.align import estimate_offset
+from syncaudio.features import extract_envelope
+from syncaudio.ffmpeg_backend import extract_pcm
+from syncaudio.models import AudioTrackSpec
+
+_DETECTION_SAMPLE_RATE = 16000
 
 DEFAULT_WINDOW_S = 30.0
 DEFAULT_HOP_S = 10.0
@@ -296,3 +301,38 @@ def refine_segments(
         refined[-1] = dataclasses.replace(prev, end_s=boundary)
         refined.append(dataclasses.replace(cur, start_s=boundary))
     return refined
+
+
+def detect_segments(
+    reference: AudioTrackSpec,
+    candidate: AudioTrackSpec,
+    *,
+    start: float = 0.0,
+    duration: float | None = None,
+    window_s: float = DEFAULT_WINDOW_S,
+    hop_s: float = DEFAULT_HOP_S,
+    margin_s: float = DEFAULT_MARGIN_S,
+    log: Callable[[str], None] = lambda msg: None,
+) -> list[Segment]:
+    """End-to-end: extract both tracks, detect windowed offsets, classify, refine.
+
+    The one-stop entry point used by both the `segments` CLI command and
+    `render --segmented`.
+    """
+    log(f"[extraction] référence {reference.raw} ...")
+    ref_pcm = extract_pcm(reference, sample_rate=_DETECTION_SAMPLE_RATE, start=start or None, duration=duration)
+    ref_env, frame_rate = extract_envelope(ref_pcm, _DETECTION_SAMPLE_RATE)
+
+    log(f"[extraction] piste {candidate.raw} ...")
+    cand_pcm = extract_pcm(candidate, sample_rate=_DETECTION_SAMPLE_RATE, start=start or None, duration=duration)
+    cand_env, _ = extract_envelope(cand_pcm, _DETECTION_SAMPLE_RATE)
+
+    total_duration_s = len(ref_pcm) / _DETECTION_SAMPLE_RATE
+
+    log("[analyse] fenêtres glissantes...")
+    windows = windowed_offsets(ref_env, cand_env, frame_rate, window_s=window_s, hop_s=hop_s, margin_s=margin_s)
+    segs = classify_segments(windows, total_duration_s)
+    if len(segs) > 1:
+        log("[analyse] affinage des frontières...")
+        segs = refine_segments(ref_env, cand_env, frame_rate, segs)
+    return segs

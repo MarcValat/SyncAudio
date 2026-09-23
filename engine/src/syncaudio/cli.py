@@ -12,7 +12,7 @@ from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import FFmpegError, extract_pcm, parse_track_spec, probe_audio_streams
 from syncaudio.models import AudioTrackSpec
-from syncaudio.render import plan_corrections, render as render_tracks
+from syncaudio.render import plan_corrections, plan_segmented_correction, render as render_tracks
 from syncaudio.segments import (
     DEFAULT_HOP_S,
     DEFAULT_MARGIN_S,
@@ -189,6 +189,23 @@ def align(
     is_flag=True,
     help="N'exporte que la/les piste(s) corrigée(s) en .flac, sans remuxer de MKV.",
 )
+@click.option(
+    "--segmented",
+    is_flag=True,
+    help=(
+        "Corrige aussi la dérive progressive et les sauts nets, pas seulement un décalage constant "
+        "(voir `segments` pour visualiser d'abord ce qui sera fait). Incompatible avec --import-subs pour l'instant."
+    ),
+)
+@click.option("--window", "window_s", default=DEFAULT_WINDOW_S, show_default=True, help="Avec --segmented : taille de fenêtre d'analyse (s).")
+@click.option("--hop", "hop_s", default=DEFAULT_HOP_S, show_default=True, help="Avec --segmented : pas entre fenêtres (s).")
+@click.option(
+    "--margin",
+    "margin_s",
+    default=DEFAULT_MARGIN_S,
+    show_default=True,
+    help="Avec --segmented : décalage local max recherché par fenêtre (s).",
+)
 @click.option("--dry-run", is_flag=True, help="Détecte et affiche la correction prévue sans rien écrire.")
 @click.option(
     "--start",
@@ -212,19 +229,23 @@ def render(
     import_subs: tuple[str, ...],
     output_path: str | None,
     audio_only: bool,
+    segmented: bool,
+    window_s: float,
+    hop_s: float,
+    margin_s: float,
     dry_run: bool,
     start: float,
     duration: float | None,
     quiet: bool,
 ) -> None:
-    """Corrige le décalage constant de pistes de INPUT par rapport à --reference.
+    """Corrige le décalage de pistes de INPUT par rapport à --reference.
 
     INPUT est un seul fichier conteneur (ex. mkv) avec plusieurs pistes
     audio ; --import-audio/--import-subs permettent d'y ajouter des pistes
     venant d'un AUTRE fichier (ex. injecter la piste audio + sous-titres
-    d'un mkv VF dans un mkv VO), resynchronisées automatiquement. Ne gère
-    que le cas décalage constant (pas de dérive ni de sauts) ; voir le
-    README pour les limites.
+    d'un mkv VF dans un mkv VO), resynchronisées automatiquement. Par
+    défaut ne gère que le cas décalage constant ; --segmented gère aussi la
+    dérive et les sauts. Voir le README pour les limites.
     """
     try:
         streams = probe_audio_streams(input_path)
@@ -269,9 +290,65 @@ def render(
             "--import-subs nécessite exactement un --import-audio, pour en déduire le décalage à appliquer aux sous-titres."
         )
 
+    if segmented and import_subs_specs:
+        raise click.ClickException("--segmented ne peut pas encore être combiné avec --import-subs.")
+
     reference_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
     same_file_specs = [AudioTrackSpec(raw=f"{input_path}@{i}", path=input_path, stream_index=i) for i in targets]
     candidates = same_file_specs + import_audio_specs
+
+    if segmented:
+        try:
+            seg_corrections = [
+                plan_segmented_correction(
+                    reference_spec,
+                    spec,
+                    start=start,
+                    duration=duration,
+                    window_s=window_s,
+                    hop_s=hop_s,
+                    margin_s=margin_s,
+                    log=lambda m: _log(m, quiet),
+                )
+                for spec in candidates
+            ]
+        except FFmpegError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        for sc in seg_corrections:
+            click.echo(f"  {sc.track.raw:<30} (langue={sc.language or '?'})")
+            for seg in sc.segments:
+                kind = "dérive  " if seg.is_drift else "constant"
+                click.echo(
+                    f"      [{seg.start_s:7.1f}s -> {seg.end_s:7.1f}s]  {kind}  "
+                    f"offset {seg.offset_start:+7.3f}s -> {seg.offset_end:+7.3f}s"
+                )
+
+        if dry_run:
+            click.echo("[dry-run] rien écrit.")
+            return
+
+        if output_path is None:
+            stem = Path(input_path)
+            while stem.suffix:
+                stem = stem.with_suffix("")
+            output_path = str(stem) + ".synced.mkv"
+
+        try:
+            written = render_tracks(
+                input_path,
+                reference_index,
+                corrections=[],
+                output_path=output_path,
+                audio_only=audio_only,
+                segmented_corrections=seg_corrections,
+            )
+        except FFmpegError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        for path in written:
+            click.echo(f"Écrit : {path}")
+        return
 
     try:
         corrections = plan_corrections(
