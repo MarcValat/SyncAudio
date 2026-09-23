@@ -219,8 +219,14 @@ def main() -> None:
     cand_data, cand_sr = read_wav(cand_wav_src)
 
     fixtures = build_fixtures(args.seed)
+    resolved_source = args.source.resolve()
+    try:
+        source_display = resolved_source.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        source_display = resolved_source.name  # hors du repo : ne pas exposer le chemin local
+
     manifest = {
-        "source": str(args.source),
+        "source": source_display,
         "window": {"start_s": args.start, "duration_s": args.duration},
         "reference_track": REFERENCE_TRACK,
         "candidate_track": CANDIDATE_TRACK,

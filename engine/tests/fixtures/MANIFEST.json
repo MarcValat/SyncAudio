@@ -1,5 +1,5 @@
 {
-  "source": "C:\\Users\\marcv\\Desktop\\Dossiers\\Projects\\syncaudio\\testfile.mkv",
+  "source": "testfile.mkv",
   "window": {
     "start_s": 0.0,
     "duration_s": 360.0
