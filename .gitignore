@@ -5,3 +5,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Media: never commit source or generated test media (large, copyrighted).
+*.mkv
+*.wav
+*.flac
+engine/tests/fixtures/generated/
