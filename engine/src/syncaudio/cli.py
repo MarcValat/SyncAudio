@@ -129,7 +129,7 @@ def align(
 
     click.echo(f"Référence : {reference}")
     for spec, est in results:
-        flag = "  ⚠ ambigu (contenu répétitif ?)" if est.ambiguous else ""
+        flag = "  [!] ambigu (contenu répétitif ?)" if est.ambiguous else ""
         click.echo(
             f"  {spec.raw:<30} décalage={est.offset_seconds:+8.3f}s  confiance={est.confidence:5.2f}{flag}"
         )
