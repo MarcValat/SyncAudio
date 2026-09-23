@@ -13,6 +13,7 @@ _STREAM_RE = re.compile(
     r"^\s*Stream #\d+:(?P<index>\d+)(?:\((?P<lang>[^)]+)\))?:\s*Audio:\s*"
     r"(?P<codec>[^,]+),\s*(?P<rate>\d+)\s*Hz,\s*(?P<channels>[^,]+)"
 )
+_DURATION_RE = re.compile(r"Duration:\s*(?P<h>\d+):(?P<m>\d+):(?P<s>\d+(?:\.\d+)?)")
 
 
 class FFmpegError(RuntimeError):
@@ -88,6 +89,20 @@ def probe_audio_streams(path: str) -> list[AudioStreamInfo]:
     if not streams:
         raise FFmpegError(f"Aucune piste audio trouvée dans {path!r}.")
     return streams
+
+
+def probe_duration(path: str) -> float:
+    """Return the container's total duration in seconds, as reported by ffmpeg."""
+    ffmpeg = resolve_ffmpeg()
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path],
+        capture_output=True,
+        text=True,
+    )
+    match = _DURATION_RE.search(proc.stderr)
+    if not match:
+        raise FFmpegError(f"Impossible de déterminer la durée de {path!r}.")
+    return int(match["h"]) * 3600 + int(match["m"]) * 60 + float(match["s"])
 
 
 _CHANNEL_LAYOUTS = {
