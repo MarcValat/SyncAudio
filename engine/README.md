@@ -54,6 +54,38 @@ Sortie JSON pour un usage scripté :
 uv run syncaudio align ref.wav candidate.wav --json
 ```
 
+## Corriger un décalage constant (`render`)
+
+`align` ne fait que mesurer ; `render` corrige, sur un seul fichier conteneur (ex. mkv) avec plusieurs pistes audio :
+
+```
+uv run syncaudio render film.mkv --reference 0 --track 1
+```
+
+Détecte le décalage de la piste `@1` par rapport à la référence `@0`, puis écrit `film.synced.mkv` : vidéo, sous-titres et pièces jointes copiés tels quels, piste de référence copiée telle quelle, piste corrigée réencodée (flac) et casée sur la durée de la référence (silence ajouté si elle devient trop courte, coupée si trop longue). Sans `--track`, toutes les pistes sauf la référence sont corrigées.
+
+Autres options utiles :
+
+- `--dry-run` : affiche le décalage détecté et la correction prévue sans rien écrire.
+- `--audio-only` : exporte uniquement la/les piste(s) corrigée(s) en `.flac` (`<sortie>.<fichier>.trackN.flac`) au lieu de remuxer un MKV complet.
+- `-o/--output` : chemin de sortie (défaut : `<INPUT>.synced.mkv`).
+- `--only-imports` : n'inclut aucune piste de INPUT à part la référence (utile avec `--import-audio`/`--import-subs` ci-dessous, pour ne pas dupliquer une piste déjà présente dans INPUT).
+
+### Injecter des pistes d'un autre fichier
+
+Pour ajouter, resynchronisée, une piste venant d'un **second** fichier (ex. injecter l'audio + les sous-titres d'un mkv VF dans un mkv VO complet) :
+
+```
+uv run syncaudio render vo.mkv --reference 0 --only-imports \
+  --import-audio vf.mkv@1 \
+  --import-subs vf.mkv@2
+```
+
+`--import-audio` (répétable) ajoute une piste audio d'un autre fichier, décalage détecté et corrigé automatiquement comme pour `--track`. `--import-subs` (répétable) ajoute une piste de sous-titres d'un autre fichier : contrairement à l'audio, on ne peut pas « couper »/« combler » du texte, donc ses horodatages sont simplement translatés du même montant que le décalage audio détecté — ce qui impose d'avoir **exactement un** `--import-audio` pour en déduire ce décalage (aucune détection séparée pour les sous-titres seuls pour l'instant).
+- `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
+
+Comme `align`, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent (voir « Limites connues » plus haut ; la détection de dérive/sauts est prévue pour une prochaine version).
+
 ### Accélérer sur de gros fichiers
 
 Le temps d'extraction (ffmpeg) et surtout d'analyse spectrale (HPSS) croît avec la durée traitée. Comme l'algorithme cherche un décalage **constant**, il n'a pas besoin de toute la piste : un extrait représentatif suffit. `--start` et `--duration` (en secondes) limitent l'extraction/analyse à une fenêtre de chaque piste, ce qui accélère le traitement dans les mêmes proportions :

@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
 import click
 
 from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import FFmpegError, extract_pcm, parse_track_spec, probe_audio_streams
+from syncaudio.models import AudioTrackSpec
+from syncaudio.render import plan_corrections, render as render_tracks
 
 
 def _log(message: str, quiet: bool) -> None:
@@ -133,6 +136,176 @@ def align(
         click.echo(
             f"  {spec.raw:<30} décalage={est.offset_seconds:+8.3f}s  confiance={est.confidence:5.2f}{flag}"
         )
+
+
+@cli.command()
+@click.argument("input_path", metavar="INPUT")
+@click.option(
+    "--reference",
+    "reference_index",
+    required=True,
+    type=int,
+    help="Index (voir `probe`) de la piste de référence, jamais modifiée.",
+)
+@click.option(
+    "--track",
+    "track_indices",
+    multiple=True,
+    type=int,
+    help="Index d'une piste à resynchroniser (répétable). Défaut : toutes les pistes sauf la référence.",
+)
+@click.option(
+    "--only-imports",
+    is_flag=True,
+    help="N'inclut aucune piste de INPUT à part la référence (seules les --import-audio/--import-subs sont ajoutées).",
+)
+@click.option(
+    "--import-audio",
+    "import_audio",
+    multiple=True,
+    help="Piste audio d'un AUTRE fichier à ajouter, resynchronisée automatiquement (chemin ou chemin@INDEX, répétable).",
+)
+@click.option(
+    "--import-subs",
+    "import_subs",
+    multiple=True,
+    help=(
+        "Piste de sous-titres d'un AUTRE fichier à ajouter (chemin ou chemin@INDEX, répétable) ; "
+        "décalée du même montant que l'unique --import-audio fourni (requis pour en déduire le décalage)."
+    ),
+)
+@click.option("-o", "--output", "output_path", default=None, help="Fichier de sortie. Défaut : <INPUT>.synced.mkv")
+@click.option(
+    "--audio-only",
+    is_flag=True,
+    help="N'exporte que la/les piste(s) corrigée(s) en .flac, sans remuxer de MKV.",
+)
+@click.option("--dry-run", is_flag=True, help="Détecte et affiche la correction prévue sans rien écrire.")
+@click.option(
+    "--start",
+    default=0.0,
+    show_default=True,
+    help="Ignore les START premières secondes lors de la détection (n'affecte pas le rendu).",
+)
+@click.option(
+    "--duration",
+    default=None,
+    type=float,
+    help="Limite la détection aux DURATION secondes suivant --start (n'affecte pas le rendu).",
+)
+@click.option("-q", "--quiet", is_flag=True, help="Ne pas afficher la progression sur stderr.")
+def render(
+    input_path: str,
+    reference_index: int,
+    track_indices: tuple[int, ...],
+    only_imports: bool,
+    import_audio: tuple[str, ...],
+    import_subs: tuple[str, ...],
+    output_path: str | None,
+    audio_only: bool,
+    dry_run: bool,
+    start: float,
+    duration: float | None,
+    quiet: bool,
+) -> None:
+    """Corrige le décalage constant de pistes de INPUT par rapport à --reference.
+
+    INPUT est un seul fichier conteneur (ex. mkv) avec plusieurs pistes
+    audio ; --import-audio/--import-subs permettent d'y ajouter des pistes
+    venant d'un AUTRE fichier (ex. injecter la piste audio + sous-titres
+    d'un mkv VF dans un mkv VO), resynchronisées automatiquement. Ne gère
+    que le cas décalage constant (pas de dérive ni de sauts) ; voir le
+    README pour les limites.
+    """
+    try:
+        streams = probe_audio_streams(input_path)
+    except FFmpegError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    all_indices = [s.index for s in streams]
+    if reference_index not in all_indices:
+        raise click.ClickException(
+            f"Index de référence {reference_index} absent de {input_path!r} (pistes : {all_indices})."
+        )
+
+    if only_imports and track_indices:
+        raise click.ClickException("--only-imports et --track sont incompatibles.")
+    if only_imports:
+        targets: list[int] = []
+    else:
+        targets = sorted(track_indices) if track_indices else [i for i in all_indices if i != reference_index]
+    if reference_index in targets:
+        raise click.ClickException("La piste de référence ne peut pas aussi être une piste à corriger.")
+    unknown = [i for i in targets if i not in all_indices]
+    if unknown:
+        raise click.ClickException(f"Index(es) inconnu(s) : {unknown} (pistes disponibles : {all_indices}).")
+
+    try:
+        import_audio_specs = [parse_track_spec(s) for s in import_audio]
+        import_subs_specs = [parse_track_spec(s) for s in import_subs]
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for spec in import_audio_specs:
+        try:
+            ext_streams = {s.index for s in probe_audio_streams(spec.path)}
+        except FFmpegError as exc:
+            raise click.ClickException(str(exc)) from exc
+        idx = spec.stream_index if spec.stream_index is not None else 0
+        if idx not in ext_streams:
+            raise click.ClickException(f"Index audio {idx} absent de {spec.path!r} (pistes : {sorted(ext_streams)}).")
+
+    if import_subs_specs and len(import_audio_specs) != 1:
+        raise click.ClickException(
+            "--import-subs nécessite exactement un --import-audio, pour en déduire le décalage à appliquer aux sous-titres."
+        )
+
+    reference_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
+    same_file_specs = [AudioTrackSpec(raw=f"{input_path}@{i}", path=input_path, stream_index=i) for i in targets]
+    candidates = same_file_specs + import_audio_specs
+
+    try:
+        corrections = plan_corrections(
+            reference_spec, candidates, start=start, duration=duration, log=lambda m: _log(m, quiet)
+        )
+    except FFmpegError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for corr in corrections:
+        if corr.needs_correction:
+            action = "trim début + pad" if corr.offset_seconds > 0 else "pad début + trim"
+            action = f"décalage={corr.offset_seconds:+.3f}s -> {action}"
+        else:
+            action = "déjà synchro, aucune correction"
+        flag = "  [!] ambigu (contenu répétitif ?)" if corr.ambiguous else ""
+        click.echo(f"  {corr.track.raw:<30} (langue={corr.language or '?'})  {action}  confiance={corr.confidence:.2f}{flag}")
+
+    imported_subs: list[tuple[AudioTrackSpec, float]] = []
+    if import_subs_specs:
+        subs_offset = corrections[len(same_file_specs)].offset_seconds
+        imported_subs = [(spec, subs_offset) for spec in import_subs_specs]
+        for spec in import_subs_specs:
+            click.echo(f"  {spec.raw:<30} (sous-titres)  décalés de {-subs_offset:+.3f}s (alignés sur l'audio importé)")
+
+    if dry_run:
+        click.echo("[dry-run] rien écrit.")
+        return
+
+    if output_path is None:
+        stem = Path(input_path)
+        while stem.suffix:
+            stem = stem.with_suffix("")
+        output_path = str(stem) + ".synced.mkv"
+
+    try:
+        written = render_tracks(
+            input_path, reference_index, corrections, output_path, audio_only=audio_only, imported_subs=imported_subs
+        )
+    except FFmpegError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for path in written:
+        click.echo(f"Écrit : {path}")
 
 
 def main() -> None:
