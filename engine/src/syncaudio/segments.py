@@ -7,11 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from syncaudio.align import estimate_offset
-from syncaudio.features import extract_envelope
-from syncaudio.ffmpeg_backend import extract_pcm
+from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
 from syncaudio.models import AudioTrackSpec
-
-_DETECTION_SAMPLE_RATE = 16000
 
 DEFAULT_WINDOW_S = 30.0
 DEFAULT_HOP_S = 10.0
@@ -319,15 +316,13 @@ def detect_segments(
     The one-stop entry point used by both the `segments` CLI command and
     `render --segmented`.
     """
-    log(f"[extraction] référence {reference.raw} ...")
-    ref_pcm = extract_pcm(reference, sample_rate=_DETECTION_SAMPLE_RATE, start=start or None, duration=duration)
-    ref_env, frame_rate = extract_envelope(ref_pcm, _DETECTION_SAMPLE_RATE)
+    ref_env, frame_rate = get_envelope(reference, ANALYSIS_SAMPLE_RATE, start, duration, log=log)
+    cand_env, _ = get_envelope(candidate, ANALYSIS_SAMPLE_RATE, start, duration, log=log)
 
-    log(f"[extraction] piste {candidate.raw} ...")
-    cand_pcm = extract_pcm(candidate, sample_rate=_DETECTION_SAMPLE_RATE, start=start or None, duration=duration)
-    cand_env, _ = extract_envelope(cand_pcm, _DETECTION_SAMPLE_RATE)
-
-    total_duration_s = len(ref_pcm) / _DETECTION_SAMPLE_RATE
+    # A close-enough stand-in for the reference's exact decoded sample count
+    # (which the cache doesn't expose): STFT framing is off by at most one
+    # window's worth of samples, irrelevant next to window_s/hop_s scale.
+    total_duration_s = len(ref_env) / frame_rate
 
     log("[analyse] fenêtres glissantes...")
     windows = windowed_offsets(ref_env, cand_env, frame_rate, window_s=window_s, hop_s=hop_s, margin_s=margin_s)

@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from syncaudio.align import estimate_offset
-from syncaudio.features import extract_envelope
+from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
 from syncaudio.ffmpeg_backend import (
     FFmpegError,
-    extract_pcm,
     probe_audio_streams,
     probe_duration,
     probe_subtitle_codec,
@@ -26,7 +25,6 @@ from syncaudio.subtitles import format_for_codec, shift_subtitle_text
 # residuals of a few tens of ms are expected even for a genuinely constant
 # offset (see engine/tests/fixtures/MANIFEST.json ground-truth comparisons).
 _NO_CORRECTION_THRESHOLD_S = 0.05
-_ANALYSIS_SAMPLE_RATE = 16000
 
 
 def _stream_index(spec: AudioTrackSpec) -> int:
@@ -147,11 +145,6 @@ def segment_correction_filter(segments: Sequence[Segment], input_label: str, out
     return ";".join([*chains, concat])
 
 
-def _analyze(spec: AudioTrackSpec, start: float, duration: float | None) -> tuple:
-    pcm = extract_pcm(spec, sample_rate=_ANALYSIS_SAMPLE_RATE, start=start or None, duration=duration)
-    return extract_envelope(pcm, _ANALYSIS_SAMPLE_RATE)
-
-
 def plan_corrections(
     reference: AudioTrackSpec,
     candidates: Sequence[AudioTrackSpec],
@@ -173,13 +166,11 @@ def plan_corrections(
             lang_cache[spec.path] = {s.index: s.language for s in probe_audio_streams(spec.path)}
         return lang_cache[spec.path].get(_stream_index(spec))
 
-    log(f"[analyse] reference {reference.raw} ...")
-    ref_env, frame_rate = _analyze(reference, start, duration)
+    ref_env, frame_rate = get_envelope(reference, ANALYSIS_SAMPLE_RATE, start, duration, log=log)
 
     corrections = []
     for spec in candidates:
-        log(f"[analyse] piste {spec.raw} ...")
-        env, _ = _analyze(spec, start, duration)
+        env, _ = get_envelope(spec, ANALYSIS_SAMPLE_RATE, start, duration, log=log)
         estimate = estimate_offset(ref_env, env, frame_rate)
         corrections.append(
             TrackCorrection(

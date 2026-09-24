@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
 from syncaudio.ffmpeg_backend import FFmpegError, probe_audio_streams
 from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
@@ -150,6 +151,36 @@ def probe(path: str) -> ProbeResponse:
             for s in streams
         ],
     )
+
+
+class PrefetchRequest(BaseModel):
+    tracks: list[TrackRef]
+    start: float = 0.0
+    duration: float | None = None
+
+
+class PrefetchResponse(BaseModel):
+    cached: int
+
+
+def _do_prefetch(req: PrefetchRequest, log: Callable[[str], None] = lambda _msg: None) -> PrefetchResponse:
+    for ref in req.tracks:
+        get_envelope(ref.to_spec(), ANALYSIS_SAMPLE_RATE, req.start, req.duration, log=log)
+    return PrefetchResponse(cached=len(req.tracks))
+
+
+@app.post("/jobs/prefetch", response_model=JobStarted)
+def start_prefetch_job(req: PrefetchRequest) -> JobStarted:
+    """Warm the analysis cache for every listed track in the background.
+
+    Meant to be fired (and forgotten -- errors here are non-fatal, a later
+    align/segments/render call will just redo the work) right after
+    `/probe` succeeds, so that by the time the user picks a reference and
+    clicks a detection button, the ~7s-per-track extraction+envelope cost
+    (see analysis_cache.py) is already paid.
+    """
+    job = start_job(lambda log: _do_prefetch(req, log).model_dump())
+    return JobStarted(job_id=job.id)
 
 
 class AlignRequest(BaseModel):

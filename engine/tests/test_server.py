@@ -8,10 +8,18 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import syncaudio.analysis_cache as analysis_cache
 from syncaudio.ffmpeg_backend import resolve_ffmpeg
 from syncaudio.server import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_analysis_cache():
+    analysis_cache.clear()
+    yield
+    analysis_cache.clear()
 
 
 def _make_bed(duration_s: float, sr: int, seed: int, hits_per_second: float = 3.0) -> np.ndarray:
@@ -241,3 +249,29 @@ def test_job_error_is_reported_not_left_hanging() -> None:
     job_id = resp.json()["job_id"]
     events = _drain_job_ws(job_id)
     assert events[-1]["type"] == "error"
+
+
+def test_prefetch_warms_the_cache_for_a_later_align(offset_mkv: tuple[Path, float]) -> None:
+    mkv, offset_s = offset_mkv
+
+    resp = client.post(
+        "/jobs/prefetch",
+        json={"tracks": [{"path": str(mkv), "index": 0}, {"path": str(mkv), "index": 1}]},
+    )
+    events = _drain_job_ws(resp.json()["job_id"])
+    assert events[-1]["type"] == "done"
+    assert events[-1]["result"]["cached"] == 2
+    # Both tracks were freshly extracted (no prior cache) -> real work happened.
+    assert any("[extraction]" in e["message"] for e in events if e["type"] == "log")
+
+    # A subsequent align on the very same tracks should be served entirely
+    # from cache -- no further extraction, and the result is unaffected.
+    resp = client.post(
+        "/jobs/align",
+        json={"reference": {"path": str(mkv), "index": 0}, "candidates": [{"path": str(mkv), "index": 1}]},
+    )
+    events = _drain_job_ws(resp.json()["job_id"])
+    assert events[-1]["type"] == "done"
+    assert not any("[extraction]" in e["message"] for e in events if e["type"] == "log")
+    assert any("[cache]" in e["message"] for e in events if e["type"] == "log")
+    assert abs(events[-1]["result"]["results"][0]["offset_seconds"] - offset_s) < 0.1
