@@ -91,6 +91,18 @@ export async function startPrefetchJob(path: string, trackIndices: number[]): Pr
   return data.job_id as string;
 }
 
+/**
+ * A short playable WAV clip of one track, for the "listen before you
+ * render" preview -- not the 16kHz analysis PCM, a normal-rate clip meant
+ * to actually be played back in an <audio> element.
+ */
+export async function fetchClip(path: string, index: number, start: number, duration: number): Promise<Blob> {
+  const params = new URLSearchParams({ path, index: String(index), start: String(start), duration: String(duration) });
+  const resp = await fetch(`${BASE_URL}/clip?${params.toString()}`);
+  if (!resp.ok) throw new Error(await readErrorDetail(resp));
+  return resp.blob();
+}
+
 export async function startSegmentsJob(
   referencePath: string,
   referenceIndex: number,

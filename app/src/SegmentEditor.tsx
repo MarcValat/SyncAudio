@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SegmentOut } from "./api";
+import { formatTime } from "./SegmentChart";
 import "./SegmentEditor.css";
 
 const WIDTH = 900;
@@ -14,13 +15,6 @@ const PLOT_H = HEIGHT - MARGIN.top - MARGIN.bottom;
 // segment the backend classified as constant the moment it's opened for
 // editing -- exactly the bug this comment replaced.
 const DRIFT_EPS_S = 0.2;
-
-function formatTime(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
-  return `${m}:${rem.toString().padStart(2, "0")}`;
-}
 
 /** The editable form of a segment list: N+1 boundary times (shared between
  * consecutive segments, so dragging or typing one can never open a gap or
@@ -282,6 +276,7 @@ export function SegmentEditor({
 
         <div className="editor-actions">
           <button
+            className="primary-button"
             onClick={() => {
               onSave(segmentsPreview);
               onClose();

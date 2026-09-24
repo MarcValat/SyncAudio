@@ -11,9 +11,10 @@
 }
 
 .editor-panel {
-  background: var(--panel-bg, #f6f6f6);
+  background: var(--surface, #f6f6f6);
   color: inherit;
-  border-radius: 12px;
+  border-radius: var(--radius, 12px);
+  box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.25));
   padding: 1.2em 1.4em;
   width: 100%;
   max-width: 960px;
@@ -21,12 +22,6 @@
   overflow-y: auto;
   box-sizing: border-box;
   text-align: left;
-}
-
-@media (prefers-color-scheme: dark) {
-  .editor-panel {
-    background: #2f2f2f;
-  }
 }
 
 .editor-header {
@@ -44,6 +39,9 @@
 .editor-chart {
   width: 100%;
   height: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: var(--radius-sm, 8px);
+  box-sizing: border-box;
 }
 
 .editor-chart .zero-line {
@@ -99,6 +97,8 @@
   margin-top: 0.8em;
   max-height: 14em;
   overflow-y: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--radius-sm, 8px);
 }
 
 .editor-table {
@@ -111,6 +111,16 @@
 .editor-table td {
   padding: 0.35em 0.5em;
   text-align: center;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+}
+
+.editor-table th {
+  font-size: 0.75em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface-alt, rgba(128, 128, 128, 0.08));
 }
 
 .editor-table input[type="number"] {

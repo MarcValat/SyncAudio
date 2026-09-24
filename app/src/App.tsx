@@ -15,6 +15,8 @@ import {
 import { SegmentChart } from "./SegmentChart";
 import { LogPanel } from "./LogPanel";
 import { SegmentEditor } from "./SegmentEditor";
+import { TrackPreview } from "./TrackPreview";
+import { basename } from "./paths";
 import "./App.css";
 
 type EngineStatus = "starting" | "ready" | "unreachable";
@@ -204,34 +206,45 @@ function App() {
   const analyzedTracks = (tracks ?? []).filter((t) => analyses[t.index]);
   const editingEntry = editingTrack !== null ? analyses[editingTrack] : null;
 
+  // Nothing in the app is usable before the sidecar answers -- a full-screen
+  // splash instead of a text banner over an inert shell makes that obvious
+  // and stops the user from clicking around a UI that can't do anything yet.
+  if (engineStatus !== "ready") {
+    return (
+      <div className="container startup-screen">
+        {engineStatus === "starting" ? (
+          <>
+            <div className="spinner" aria-hidden="true" />
+            <p className="startup-text">Démarrage du moteur...</p>
+          </>
+        ) : (
+          <>
+            <p className="startup-text error">Moteur injoignable — le sidecar a-t-il démarré ? (voir la console)</p>
+            <button onClick={pollHealth}>Réessayer</button>
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="container">
       <header className="app-header">
         <h1>SyncAudio</h1>
-        {engineStatus !== "ready" && (
-          <p className="engine-status">
-            {engineStatus === "starting" ? (
-              "Démarrage du moteur..."
-            ) : (
-              <>
-                Moteur injoignable — le sidecar a-t-il démarré ? (voir la console){" "}
-                <button className="small-button" onClick={pollHealth}>
-                  Réessayer
-                </button>
-              </>
-            )}
-          </p>
-        )}
       </header>
 
       <div className="file-bar">
-        <button onClick={handleOpenFile} disabled={engineStatus !== "ready"}>
+        <button className="primary-button" onClick={handleOpenFile}>
           Ouvrir un fichier
         </button>
-        {filePath && <span className="file-path">{filePath}</span>}
+        {filePath && (
+          <span className="file-path" title={filePath}>
+            {basename(filePath)}
+          </span>
+        )}
         {prefetching && (
-          <span className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer la première détection.">
-            Pré-analyse en cours...
+          <span className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer le premier clic sur Analyser.">
+            Analyse audio en cours...
           </span>
         )}
       </div>
@@ -246,45 +259,48 @@ function App() {
           )}
           {tracks && tracks.length >= 2 && (
             <>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Piste</th>
-                    <th>Langue</th>
-                    <th>Codec</th>
-                    <th>Réf.</th>
-                    <th>Analyser</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tracks.map((t) => (
-                    <tr key={t.index}>
-                      <td>@{t.index}</td>
-                      <td>{t.language ?? "?"}</td>
-                      <td>{t.codec ?? "?"}</td>
-                      <td>
-                        <input
-                          type="radio"
-                          name="reference"
-                          checked={referenceIndex === t.index}
-                          onChange={() => handleReferenceChange(t.index)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="checkbox"
-                          disabled={referenceIndex === t.index}
-                          checked={targetIndices.includes(t.index)}
-                          onChange={() => toggleTarget(t.index)}
-                        />
-                      </td>
+              <div className="tracks-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Piste</th>
+                      <th>Langue</th>
+                      <th>Codec</th>
+                      <th>Réf.</th>
+                      <th>Analyser</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {tracks.map((t) => (
+                      <tr key={t.index}>
+                        <td>@{t.index}</td>
+                        <td>{t.language ?? "?"}</td>
+                        <td>{t.codec ?? "?"}</td>
+                        <td>
+                          <input
+                            type="radio"
+                            name="reference"
+                            checked={referenceIndex === t.index}
+                            onChange={() => handleReferenceChange(t.index)}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="checkbox"
+                            disabled={referenceIndex === t.index}
+                            checked={targetIndices.includes(t.index)}
+                            onChange={() => toggleTarget(t.index)}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
               <div className="tracks-actions">
                 <button
+                  className="primary-button"
                   onClick={handleAnalyzeSelected}
                   disabled={referenceIndex === null || targetIndices.length === 0 || anySelectedRunning}
                   title="Détecte le décalage de chaque piste cochée par rapport à la référence (dérive et sauts nets inclus), avec la courbe correspondante."
@@ -304,7 +320,7 @@ function App() {
           {analyzedTracks.map((t) => {
             const entry = analyses[t.index];
             return (
-              <div className="analysis-card" key={t.index}>
+              <div className={`analysis-card status-${entry.status}`} key={t.index}>
                 <h3>
                   Piste @{t.index} ({t.language ?? "?"})
                 </h3>
@@ -328,10 +344,20 @@ function App() {
                       </button>
                     </p>
                     <SegmentChart segments={entry.result.segments} />
+                    {filePath && (
+                      <TrackPreview
+                        filePath={filePath}
+                        referenceIndex={entry.referenceIndex}
+                        trackIndex={t.index}
+                        segments={entry.result.segments}
+                      />
+                    )}
                     <LogPanel lines={entry.renderLog} />
                     {entry.renderError && <p className="error">{entry.renderError}</p>}
                     {entry.renderResult && (
-                      <p className="render-success">Fichier écrit : {entry.renderResult.written.join(", ")}</p>
+                      <p className="render-success" title={entry.renderResult.written.join(", ")}>
+                        Fichier écrit : {entry.renderResult.written.map(basename).join(", ")}
+                      </p>
                     )}
                   </div>
                 )}

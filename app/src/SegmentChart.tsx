@@ -7,8 +7,8 @@ const MARGIN = { top: 16, right: 16, bottom: 28, left: 56 };
 const PLOT_W = WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_H = HEIGHT - MARGIN.top - MARGIN.bottom;
 
-function formatTime(seconds: number): string {
-  const s = Math.round(seconds);
+export function formatTime(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
   const m = Math.floor(s / 60);
   const rem = s % 60;
   return `${m}:${rem.toString().padStart(2, "0")}`;

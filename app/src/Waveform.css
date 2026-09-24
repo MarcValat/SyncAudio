@@ -1,0 +1,59 @@
+.waveforms {
+  margin-top: 0.6em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.waveform {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: var(--radius-sm, 8px);
+  padding: 0.4em 0.6em;
+  box-sizing: border-box;
+}
+
+.waveform-label {
+  font-size: 0.75em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.2em;
+}
+
+.waveform-svg {
+  width: 100%;
+  height: 70px;
+  display: block;
+  cursor: pointer;
+}
+
+.waveform-zero {
+  stroke: currentColor;
+  opacity: 0.15;
+  stroke-width: 1;
+}
+
+.waveform-path {
+  fill: var(--accent);
+  opacity: 0.85;
+}
+
+.waveform-reference .waveform-path {
+  fill: var(--accent);
+}
+
+.waveform-candidate .waveform-path {
+  fill: #d38a39;
+}
+
+.waveform-empty {
+  font-size: 11px;
+  fill: currentColor;
+  opacity: 0.5;
+}
+
+.waveform-cursor {
+  stroke: var(--danger, #d33);
+  stroke-width: 2;
+}
