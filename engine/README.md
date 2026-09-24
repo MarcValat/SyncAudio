@@ -156,7 +156,11 @@ Expose le même moteur (`probe`/`align`/`segments`/`render`) en HTTP, pour un fu
 uv run syncaudio serve
 ```
 
-Démarre sur `http://127.0.0.1:8756` par défaut (`--host`/`--port` pour changer). Docs interactives (Swagger) sur `/docs` une fois lancé — pratique pour explorer les endpoints à la main. `POST /render` reprend les mêmes options que la commande `render` (dont `segmented`, `import_audio`, `subs`) en JSON plutôt qu'en flags. Endpoints synchrones pour l'instant (une requête `render` bloque le temps du traitement) ; le streaming de progression viendra plus tard.
+Démarre sur `http://127.0.0.1:8756` par défaut (`--host`/`--port` pour changer). Docs interactives (Swagger) sur `/docs` une fois lancé — pratique pour explorer les endpoints à la main. `POST /render` reprend les mêmes options que la commande `render` (dont `segmented`, `import_audio`, `subs`) en JSON plutôt qu'en flags.
+
+Deux façons d'appeler `align`/`segments`/`render` :
+- **Direct** (`POST /align`, `POST /segments`, `POST /render`) : bloque jusqu'à la fin, simple pour un script ou une vérification rapide.
+- **En job** (`POST /jobs/align`, `POST /jobs/segments`, `POST /jobs/render`) : retourne immédiatement un `job_id`, le traitement tourne en arrière-plan. `WS /jobs/{job_id}/ws` diffuse en direct les mêmes messages de progression que ceux affichés par le CLI (`[analyse] ...`), puis un message final `done` (avec le résultat) ou `error`. `GET /jobs/{job_id}` permet aussi d'interroger l'état à tout moment (utile en complément ou à la place de la WebSocket). C'est le mode à utiliser pour un GUI sur un vrai fichier (dizaines de secondes) : progression en direct plutôt qu'un bouton figé.
 
 ## Développement
 

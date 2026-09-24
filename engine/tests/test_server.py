@@ -164,3 +164,74 @@ def test_render_endpoint_unknown_track_returns_400(offset_mkv: tuple[Path, float
         json={"input_path": str(mkv), "reference_index": 0, "track_indices": [7]},
     )
     assert resp.status_code == 400
+
+
+def _drain_job_ws(job_id: str) -> list[dict]:
+    events = []
+    with client.websocket_connect(f"/jobs/{job_id}/ws") as ws:
+        while True:
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] in ("done", "error"):
+                break
+    return events
+
+
+def test_job_align_streams_progress_then_result(offset_mkv: tuple[Path, float]) -> None:
+    mkv, offset_s = offset_mkv
+    resp = client.post(
+        "/jobs/align",
+        json={"reference": {"path": str(mkv), "index": 0}, "candidates": [{"path": str(mkv), "index": 1}]},
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    events = _drain_job_ws(job_id)
+    assert any(e["type"] == "log" for e in events)  # got at least one progress message
+    assert events[-1]["type"] == "done"
+    result = events[-1]["result"]
+    assert abs(result["results"][0]["offset_seconds"] - offset_s) < 0.1
+
+    # Also available via polling, after the fact.
+    status = client.get(f"/jobs/{job_id}").json()
+    assert status["status"] == "done"
+    assert status["messages"]  # the same log lines are kept for late/polling clients
+
+
+def test_job_render_writes_file_and_streams_progress(offset_mkv: tuple[Path, float]) -> None:
+    mkv, offset_s = offset_mkv
+    output_path = str(mkv.with_name("out.job.mkv"))
+    resp = client.post(
+        "/jobs/render",
+        json={
+            "input_path": str(mkv),
+            "reference_index": 0,
+            "track_indices": [1],
+            "output_path": output_path,
+        },
+    )
+    job_id = resp.json()["job_id"]
+
+    events = _drain_job_ws(job_id)
+    assert any(e["type"] == "log" for e in events)
+    assert events[-1]["type"] == "done"
+    result = events[-1]["result"]
+    assert result["written"] == [output_path]
+    assert Path(output_path).exists()
+    assert abs(result["corrections"][0]["offset_seconds"] - offset_s) < 0.1
+
+
+def test_job_ws_unknown_job_id_reports_error() -> None:
+    with client.websocket_connect("/jobs/does-not-exist/ws") as ws:
+        event = ws.receive_json()
+    assert event["type"] == "error"
+
+
+def test_job_error_is_reported_not_left_hanging() -> None:
+    resp = client.post(
+        "/jobs/render",
+        json={"input_path": "does-not-exist.mkv", "reference_index": 0},
+    )
+    job_id = resp.json()["job_id"]
+    events = _drain_job_ws(job_id)
+    assert events[-1]["type"] == "error"

@@ -2,21 +2,33 @@
 
 Thin layer over the same functions the CLI uses (``render.py``,
 ``segments.py``, ``ffmpeg_backend.py``) -- the CLI remains a perfectly valid
-client on its own; this is an additional one for the future GUI. Endpoints
-are synchronous (Starlette runs ``def`` routes in a threadpool, so one
-in-flight request doesn't block others), which keeps this first version
-simple; progress streaming for long-running renders is a planned follow-up,
-not yet implemented.
+client on its own; this is an additional one for the future GUI.
+
+Two ways to call align/segments/render:
+- Directly (``GET /probe``, ``POST /align``, ``POST /segments``, ``POST
+  /render``): synchronous, blocks until done. Simple, fine for scripting or
+  quick checks (Starlette runs ``def`` routes in a threadpool, so one
+  in-flight request doesn't block others).
+- As a job (``POST /jobs/align`` etc.): returns a ``job_id`` immediately,
+  runs in a background thread, and ``WS /jobs/{job_id}/ws`` streams the same
+  progress messages the CLI prints ("[analyse] ...") as they happen, ending
+  with the result -- or poll ``GET /jobs/{job_id}`` instead of using the
+  WebSocket. This is what a GUI should use for anything on a real file
+  (tens of seconds), so it can show live progress instead of a frozen
+  spinner.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from syncaudio.ffmpeg_backend import FFmpegError, probe_audio_streams
+from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
     SegmentedTrackCorrection,
@@ -28,6 +40,8 @@ from syncaudio.render import (
 from syncaudio.segments import DEFAULT_HOP_S, DEFAULT_MARGIN_S, DEFAULT_WINDOW_S, Segment, detect_segments
 
 app = FastAPI(title="SyncAudio", version="0.1.0")
+
+_NO_LOG: Callable[[str], None] = lambda _msg: None  # noqa: E731
 
 
 class TrackRef(BaseModel):
@@ -43,6 +57,59 @@ class TrackRef(BaseModel):
 
 def _http_error(exc: FFmpegError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
+
+
+class JobStarted(BaseModel):
+    job_id: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    messages: list[str]
+    result: dict | None = None
+    error: str | None = None
+
+
+def _job_status_response(job: Job) -> JobStatusResponse:
+    messages, _cursor, status, result, error = job.snapshot()
+    return JobStatusResponse(job_id=job.id, status=status, messages=messages, result=result, error=error)
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def job_status(job_id: str) -> JobStatusResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(404, f"Job inconnu : {job_id}")
+    return _job_status_response(job)
+
+
+@app.websocket("/jobs/{job_id}/ws")
+async def job_ws(websocket: WebSocket, job_id: str) -> None:
+    """Stream a job's progress messages as they happen, ending with its result or error."""
+    await websocket.accept()
+    job = get_job(job_id)
+    if job is None:
+        await websocket.send_json({"type": "error", "message": f"Job inconnu : {job_id}"})
+        await websocket.close()
+        return
+
+    since = 0
+    try:
+        while True:
+            new_messages, since, status, result, error = job.snapshot(since)
+            for message in new_messages:
+                await websocket.send_json({"type": "log", "message": message})
+            if status != "running":
+                if status == "done":
+                    await websocket.send_json({"type": "done", "result": result})
+                else:
+                    await websocket.send_json({"type": "error", "message": error})
+                break
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        return
+    await websocket.close()
 
 
 class TrackInfo(BaseModel):
@@ -93,14 +160,14 @@ class AlignResponse(BaseModel):
     results: list[AlignResult]
 
 
-@app.post("/align", response_model=AlignResponse)
-def align(req: AlignRequest) -> AlignResponse:
+def _do_align(req: AlignRequest, log: Callable[[str], None] = _NO_LOG) -> AlignResponse:
     try:
         corrections = plan_corrections(
             req.reference.to_spec(),
             [c.to_spec() for c in req.candidates],
             start=req.start,
             duration=req.duration,
+            log=log,
         )
     except FFmpegError as exc:
         raise _http_error(exc) from exc
@@ -117,6 +184,17 @@ def align(req: AlignRequest) -> AlignResponse:
             for c in corrections
         ],
     )
+
+
+@app.post("/align", response_model=AlignResponse)
+def align(req: AlignRequest) -> AlignResponse:
+    return _do_align(req)
+
+
+@app.post("/jobs/align", response_model=JobStarted)
+def start_align_job(req: AlignRequest) -> JobStarted:
+    job = start_job(lambda log: _do_align(req, log).model_dump())
+    return JobStarted(job_id=job.id)
 
 
 class SegmentsRequest(BaseModel):
@@ -153,8 +231,7 @@ class SegmentsResponse(BaseModel):
     segments: list[SegmentOut]
 
 
-@app.post("/segments", response_model=SegmentsResponse)
-def segments_endpoint(req: SegmentsRequest) -> SegmentsResponse:
+def _do_segments(req: SegmentsRequest, log: Callable[[str], None] = _NO_LOG) -> SegmentsResponse:
     try:
         segs = detect_segments(
             req.reference.to_spec(),
@@ -164,6 +241,7 @@ def segments_endpoint(req: SegmentsRequest) -> SegmentsResponse:
             window_s=req.window_s,
             hop_s=req.hop_s,
             margin_s=req.margin_s,
+            log=log,
         )
     except FFmpegError as exc:
         raise _http_error(exc) from exc
@@ -172,6 +250,17 @@ def segments_endpoint(req: SegmentsRequest) -> SegmentsResponse:
         track=req.track.to_spec().raw,
         segments=[SegmentOut.from_segment(s) for s in segs],
     )
+
+
+@app.post("/segments", response_model=SegmentsResponse)
+def segments_endpoint(req: SegmentsRequest) -> SegmentsResponse:
+    return _do_segments(req)
+
+
+@app.post("/jobs/segments", response_model=JobStarted)
+def start_segments_job(req: SegmentsRequest) -> JobStarted:
+    job = start_job(lambda log: _do_segments(req, log).model_dump())
+    return JobStarted(job_id=job.id)
 
 
 class SubsPair(BaseModel):
@@ -238,8 +327,7 @@ def _resolve_targets(input_path: str, reference_index: int, track_indices: list[
     return targets
 
 
-@app.post("/render", response_model=RenderResponse)
-def render_endpoint(req: RenderRequest) -> RenderResponse:
+def _do_render(req: RenderRequest, log: Callable[[str], None] = _NO_LOG) -> RenderResponse:
     targets = _resolve_targets(req.input_path, req.reference_index, req.track_indices, req.only_imports)
 
     for ref in req.import_audio:
@@ -281,13 +369,14 @@ def render_endpoint(req: RenderRequest) -> RenderResponse:
             seg_corrections: list[SegmentedTrackCorrection] = [
                 plan_segmented_correction(
                     reference_spec, spec, start=req.start, duration=req.duration,
-                    window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s,
+                    window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s, log=log,
                 )
                 for spec in candidates
             ]
             segmented_imported_subs = [
                 (pair.subs.to_spec(), seg_corrections[pos].segments) for pair, pos in zip(req.subs, subs_positions)
             ]
+            log(f"[rendu] écriture de {output_path} ...")
             written = render_tracks(
                 req.input_path, req.reference_index, corrections=[], output_path=output_path,
                 audio_only=req.audio_only, segmented_corrections=seg_corrections,
@@ -299,9 +388,10 @@ def render_endpoint(req: RenderRequest) -> RenderResponse:
             ]
         else:
             corrections: list[TrackCorrection] = plan_corrections(
-                reference_spec, candidates, start=req.start, duration=req.duration
+                reference_spec, candidates, start=req.start, duration=req.duration, log=log
             )
             imported_subs = [(pair.subs.to_spec(), corrections[pos].offset_seconds) for pair, pos in zip(req.subs, subs_positions)]
+            log(f"[rendu] écriture de {output_path} ...")
             written = render_tracks(
                 req.input_path, req.reference_index, corrections, output_path,
                 audio_only=req.audio_only, imported_subs=imported_subs,
@@ -313,3 +403,14 @@ def render_endpoint(req: RenderRequest) -> RenderResponse:
         raise _http_error(exc) from exc
 
     return RenderResponse(written=written, corrections=corrections_out)
+
+
+@app.post("/render", response_model=RenderResponse)
+def render_endpoint(req: RenderRequest) -> RenderResponse:
+    return _do_render(req)
+
+
+@app.post("/jobs/render", response_model=JobStarted)
+def start_render_job(req: RenderRequest) -> JobStarted:
+    job = start_job(lambda log: _do_render(req, log).model_dump())
+    return JobStarted(job_id=job.id)
