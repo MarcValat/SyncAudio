@@ -14,6 +14,7 @@ from syncaudio.ffmpeg_backend import (
     probe_audio_streams,
     probe_duration,
     probe_subtitle_codec,
+    probe_subtitle_count,
     resolve_ffmpeg,
 )
 from syncaudio.models import AudioTrackSpec
@@ -362,6 +363,24 @@ def render(
             metadata_args += [f"-metadata:s:a:{pos}", f"language={seg_corr.language}"]
         pos += 1
 
+    # A --subs pairing may point at a subtitle track that's already inside
+    # input_path itself (not just a donor file) -- those get mapped
+    # individually below (shifted), so they must be excluded from the
+    # generic "every subtitle in input_path" mapping to avoid ending up with
+    # both the shifted *and* the original, unshifted copy in the output.
+    native_excluded_subs = {
+        _stream_index(spec) for spec, _ in (*imported_subs, *segmented_imported_subs) if spec.path == input_path
+    }
+    if native_excluded_subs:
+        native_sub_map_args = [
+            arg
+            for n in range(probe_subtitle_count(input_path))
+            if n not in native_excluded_subs
+            for arg in ("-map", f"0:s:{n}")
+        ]
+    else:
+        native_sub_map_args = ["-map", "0:s?"]
+
     sub_map_args: list[str] = []
     for spec, offset in imported_subs:
         idx = _stream_index(spec)
@@ -382,7 +401,7 @@ def render(
             cmd += inp
         if filter_complex_parts:
             cmd += ["-filter_complex", ";".join(filter_complex_parts)]
-        cmd += ["-map", "0:v:0", *audio_map_args, "-map", "0:s?", "-map", "0:t?", *sub_map_args]
+        cmd += ["-map", "0:v:0", *audio_map_args, *native_sub_map_args, "-map", "0:t?", *sub_map_args]
         cmd += ["-c:v", "copy", *audio_codec_args, "-c:s", "copy", *metadata_args]
         cmd += ["-t", str(ref_duration), output_path]
         _run(cmd)

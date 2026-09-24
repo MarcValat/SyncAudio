@@ -12,6 +12,7 @@ from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, resolve_ffmpeg
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
+    TrackCorrection,
     _atempo_chain,
     correction_filter,
     plan_corrections,
@@ -477,3 +478,78 @@ def test_render_segmented_rewrites_imported_subtitle_timestamps(
     # audio itself was shifted.
     assert abs(starts[0] - cue_before_s) < 0.3
     assert abs(starts[1] - (cue_after_s - delta_s)) < 0.3
+
+
+@pytest.fixture()
+def offset_mkv_with_native_subs(tmp_path: Path) -> tuple[Path, float, float]:
+    """Like offset_mkv, but with a subtitle track already inside the same file, paired with track 1."""
+    sr = 44100
+    duration_s = 30.0
+    offset_s = 3.0
+    cue_start_s = 10.0
+
+    bed = _make_bed(duration_s, sr, seed=90)
+    shifted = np.concatenate([np.zeros(int(offset_s * sr)), bed])[: len(bed)]
+
+    ref_wav = tmp_path / "ref.wav"
+    cand_wav = tmp_path / "cand.wav"
+    _write_wav(ref_wav, bed, sr)
+    _write_wav(cand_wav, shifted, sr)
+    srt_path = tmp_path / "cand.srt"
+    _write_srt(srt_path, cue_start_s, cue_start_s + 2.0, "Native cue")
+
+    mkv = tmp_path / "with_native_subs.mkv"
+    ffmpeg = resolve_ffmpeg()
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav), "-i", str(cand_wav), "-i", str(srt_path),
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
+            "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=fre",
+            "-shortest", str(mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    return mkv, offset_s, cue_start_s
+
+
+def test_render_native_subs_pairing_does_not_duplicate_the_track(
+    offset_mkv_with_native_subs: tuple[Path, float, float],
+) -> None:
+    """Regression test: pairing a subtitle track already in INPUT with a --track correction
+
+    used to also get swept up by the generic "every subtitle in INPUT" mapping, producing
+    both a shifted *and* an unshifted copy of the same track in the output.
+    """
+    mkv, offset_s, cue_start_s = offset_mkv_with_native_subs
+    input_path = str(mkv)
+
+    # A known, fixed offset instead of plan_corrections' own detection: this
+    # test is about render()'s subtitle-pairing mechanics (no duplicate
+    # track, correct shift applied), not about re-proving detection
+    # accuracy (covered elsewhere) -- decoupling the two keeps it from being
+    # a flaky proxy for "did this particular synthetic clip correlate well".
+    cand_spec = _spec(mkv, 1)
+    correction = TrackCorrection(track=cand_spec, language="fre", offset_seconds=offset_s, confidence=1.0, ambiguous=False)
+    subs_spec = _spec(mkv, 0)  # the only subtitle stream in the file
+
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    render(
+        input_path,
+        reference_index=0,
+        corrections=[correction],
+        output_path=output_path,
+        imported_subs=[(subs_spec, offset_s)],
+    )
+
+    assert len(probe_audio_streams(output_path)) == 2
+
+    ffmpeg = resolve_ffmpeg()
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-i", output_path], capture_output=True, text=True)
+    subtitle_lines = [line for line in proc.stderr.splitlines() if "Subtitle" in line]
+    assert len(subtitle_lines) == 1
+
+    starts = _extract_srt_start_times(output_path)
+    assert len(starts) == 1
+    assert abs(starts[0] - (cue_start_s - offset_s)) < 0.3

@@ -167,7 +167,7 @@ def align(
 @click.option(
     "--only-imports",
     is_flag=True,
-    help="N'inclut aucune piste de INPUT à part la référence (seules les --import-audio/--import-subs sont ajoutées).",
+    help="N'inclut aucune piste de INPUT à part la référence (seules les --import-audio/--subs sont ajoutées).",
 )
 @click.option(
     "--import-audio",
@@ -176,12 +176,15 @@ def align(
     help="Piste audio d'un AUTRE fichier à ajouter, resynchronisée automatiquement (chemin ou chemin@INDEX, répétable).",
 )
 @click.option(
-    "--import-subs",
-    "import_subs",
+    "--subs",
+    "subs_pairs",
     multiple=True,
+    metavar="SPEC=AUDIO_SPEC",
     help=(
-        "Piste de sous-titres d'un AUTRE fichier à ajouter (chemin ou chemin@INDEX, répétable) ; "
-        "décalée du même montant que l'unique --import-audio fourni (requis pour en déduire le décalage)."
+        "Piste de sous-titres à ajouter, décalée EXACTEMENT comme la piste audio AUDIO_SPEC (répétable). "
+        "SPEC peut venir de INPUT ou d'un autre fichier ; AUDIO_SPEC doit désigner une piste corrigée via "
+        "--track ou --import-audio (même fichier@index). Ex. : --subs vf.mkv@2=vf.mkv@1 "
+        "ou, pour une piste déjà dans INPUT : --subs film.mkv@3=film.mkv@1."
     ),
 )
 @click.option("-o", "--output", "output_path", default=None, help="Fichier de sortie. Défaut : <INPUT>.synced.mkv")
@@ -227,7 +230,7 @@ def render(
     track_indices: tuple[int, ...],
     only_imports: bool,
     import_audio: tuple[str, ...],
-    import_subs: tuple[str, ...],
+    subs_pairs: tuple[str, ...],
     output_path: str | None,
     audio_only: bool,
     segmented: bool,
@@ -242,11 +245,14 @@ def render(
     """Corrige le décalage de pistes de INPUT par rapport à --reference.
 
     INPUT est un seul fichier conteneur (ex. mkv) avec plusieurs pistes
-    audio ; --import-audio/--import-subs permettent d'y ajouter des pistes
-    venant d'un AUTRE fichier (ex. injecter la piste audio + sous-titres
-    d'un mkv VF dans un mkv VO), resynchronisées automatiquement. Par
-    défaut ne gère que le cas décalage constant ; --segmented gère aussi la
-    dérive et les sauts. Voir le README pour les limites.
+    audio ; --import-audio permet d'y ajouter une piste venant d'un AUTRE
+    fichier, resynchronisée automatiquement (ex. injecter l'audio d'un mkv
+    VF dans un mkv VO). --subs ajoute une piste de sous-titres (de INPUT ou
+    d'un autre fichier) décalée exactement comme une piste audio corrigée
+    donnée, ex. quand on sait que la piste 2 et ses sous-titres sont déjà
+    synchro entre eux. Par défaut ne gère que le cas décalage constant ;
+    --segmented gère aussi la dérive et les sauts. Voir le README pour les
+    limites.
     """
     try:
         streams = probe_audio_streams(input_path)
@@ -273,7 +279,6 @@ def render(
 
     try:
         import_audio_specs = [parse_track_spec(s) for s in import_audio]
-        import_subs_specs = [parse_track_spec(s) for s in import_subs]
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -286,14 +291,35 @@ def render(
         if idx not in ext_streams:
             raise click.ClickException(f"Index audio {idx} absent de {spec.path!r} (pistes : {sorted(ext_streams)}).")
 
-    if import_subs_specs and len(import_audio_specs) != 1:
-        raise click.ClickException(
-            "--import-subs nécessite exactement un --import-audio, pour en déduire le décalage à appliquer aux sous-titres."
-        )
+    def _track_key(spec: AudioTrackSpec) -> tuple[str, int]:
+        idx = spec.stream_index if spec.stream_index is not None else 0
+        return (str(Path(spec.path).resolve()), idx)
+
+    subs_specs: list[AudioTrackSpec] = []
+    subs_audio_keys: list[tuple[str, int]] = []
+    for raw in subs_pairs:
+        subs_raw, sep, audio_raw = raw.partition("=")
+        if not sep:
+            raise click.ClickException(
+                f"--subs {raw!r} invalide : syntaxe attendue SPEC=AUDIO_SPEC (ex. vf.mkv@2=vf.mkv@1)."
+            )
+        try:
+            subs_specs.append(parse_track_spec(subs_raw))
+            subs_audio_keys.append(_track_key(parse_track_spec(audio_raw)))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     reference_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
     same_file_specs = [AudioTrackSpec(raw=f"{input_path}@{i}", path=input_path, stream_index=i) for i in targets]
     candidates = same_file_specs + import_audio_specs
+    candidate_keys = [_track_key(c) for c in candidates]
+
+    for raw, key in zip(subs_pairs, subs_audio_keys):
+        if key not in candidate_keys:
+            raise click.ClickException(
+                f"--subs {raw!r} : la piste audio indiquée ne correspond à aucune piste corrigée "
+                "(doit être l'un des --track ou --import-audio, même fichier@index)."
+            )
 
     if segmented:
         try:
@@ -323,11 +349,12 @@ def render(
                 )
 
         segmented_imported_subs: list[tuple[AudioTrackSpec, list[Segment]]] = []
-        if import_subs_specs:
-            subs_segments = seg_corrections[len(same_file_specs)].segments
-            segmented_imported_subs = [(spec, subs_segments) for spec in import_subs_specs]
-            for spec in import_subs_specs:
-                click.echo(f"  {spec.raw:<30} (sous-titres)  horodatages réécrits selon les mêmes segments que l'audio importé")
+        for subs_spec, key in zip(subs_specs, subs_audio_keys):
+            pos = candidate_keys.index(key)
+            segmented_imported_subs.append((subs_spec, seg_corrections[pos].segments))
+            click.echo(
+                f"  {subs_spec.raw:<30} (sous-titres)  horodatages réécrits selon les mêmes segments que {candidates[pos].raw}"
+            )
 
         if dry_run:
             click.echo("[dry-run] rien écrit.")
@@ -373,11 +400,11 @@ def render(
         click.echo(f"  {corr.track.raw:<30} (langue={corr.language or '?'})  {action}  confiance={corr.confidence:.2f}{flag}")
 
     imported_subs: list[tuple[AudioTrackSpec, float]] = []
-    if import_subs_specs:
-        subs_offset = corrections[len(same_file_specs)].offset_seconds
-        imported_subs = [(spec, subs_offset) for spec in import_subs_specs]
-        for spec in import_subs_specs:
-            click.echo(f"  {spec.raw:<30} (sous-titres)  décalés de {-subs_offset:+.3f}s (alignés sur l'audio importé)")
+    for subs_spec, key in zip(subs_specs, subs_audio_keys):
+        pos = candidate_keys.index(key)
+        offset = corrections[pos].offset_seconds
+        imported_subs.append((subs_spec, offset))
+        click.echo(f"  {subs_spec.raw:<30} (sous-titres)  décalés de {-offset:+.3f}s (alignés sur {candidates[pos].raw})")
 
     if dry_run:
         click.echo("[dry-run] rien écrit.")

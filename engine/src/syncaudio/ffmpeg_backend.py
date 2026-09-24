@@ -106,18 +106,27 @@ def probe_duration(path: str) -> float:
     return int(match["h"]) * 3600 + int(match["m"]) * 60 + float(match["s"])
 
 
-def probe_subtitle_codec(path: str, index: int) -> str:
-    """Return the codec name (e.g. ``subrip``, ``ass``) of subtitle stream ``index`` in ``path``."""
+def _list_subtitle_streams(path: str) -> list[re.Match[str]]:
     ffmpeg = resolve_ffmpeg()
     proc = subprocess.run(
         [ffmpeg, "-hide_banner", "-i", path],
         capture_output=True,
         text=True,
     )
-    subtitle_streams = [m for line in proc.stderr.splitlines() if (m := _SUBTITLE_STREAM_RE.match(line))]
+    return [m for line in proc.stderr.splitlines() if (m := _SUBTITLE_STREAM_RE.match(line))]
+
+
+def probe_subtitle_codec(path: str, index: int) -> str:
+    """Return the codec name (e.g. ``subrip``, ``ass``) of subtitle stream ``index`` in ``path``."""
+    subtitle_streams = _list_subtitle_streams(path)
     if index >= len(subtitle_streams):
         raise FFmpegError(f"Piste de sous-titres @{index} absente de {path!r} ({len(subtitle_streams)} trouvée(s)).")
     return subtitle_streams[index]["codec"]
+
+
+def probe_subtitle_count(path: str) -> int:
+    """Return how many subtitle streams ``path`` has."""
+    return len(_list_subtitle_streams(path))
 
 
 _CHANNEL_LAYOUTS = {
