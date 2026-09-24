@@ -11,7 +11,16 @@ from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, resolve_ffmpeg
 from syncaudio.models import AudioTrackSpec
-from syncaudio.render import correction_filter, plan_corrections, render
+from syncaudio.render import (
+    TrackCorrection,
+    _atempo_chain,
+    correction_filter,
+    plan_corrections,
+    plan_segmented_correction,
+    render,
+    segment_correction_filter,
+)
+from syncaudio.segments import Segment
 
 
 def test_correction_filter_positive_offset_trims_and_pads() -> None:
@@ -140,6 +149,16 @@ def _write_srt(path: Path, start_s: float, end_s: float, text: str = "Hello") ->
     path.write_text(f"1\n{fmt(start_s)} --> {fmt(end_s)}\n{text}\n", encoding="utf-8")
 
 
+def _write_srt_multi(path: Path, cues: list[tuple[float, float, str]]) -> None:
+    def fmt(t: float) -> str:
+        h, rem = divmod(t, 3600)
+        m, s = divmod(rem, 60)
+        return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{round((s - int(s)) * 1000):03d}"
+
+    blocks = [f"{i + 1}\n{fmt(a)} --> {fmt(b)}\n{text}\n" for i, (a, b, text) in enumerate(cues)]
+    path.write_text("\n".join(blocks), encoding="utf-8")
+
+
 @pytest.fixture()
 def cross_file_fixture(tmp_path: Path) -> tuple[Path, Path, float, float]:
     """A reference-only mkv, plus a separate donor mkv (audio + subtitle) lagging by 3s."""
@@ -226,3 +245,311 @@ def test_render_imports_audio_and_subs_from_another_file(cross_file_fixture: tup
 
     expected_start = cue_start_s - offset_s  # subtitles shift the same way the audio was corrected
     assert abs(actual_start - expected_start) < 0.1
+
+
+def test_atempo_chain_single_within_range() -> None:
+    assert _atempo_chain(1.02) == "atempo=1.020000"
+
+
+def test_atempo_chain_splits_large_factor() -> None:
+    assert _atempo_chain(3.0) == "atempo=2.000000,atempo=1.500000"
+
+
+def test_segment_correction_filter_concatenates_all_segments() -> None:
+    segs = [
+        Segment(0.0, 10.0, 0.0, 0.0),
+        Segment(10.0, 20.0, 2.0, 2.0),
+    ]
+    filt = segment_correction_filter(segs, "0:a:1", "out")
+    assert filt.count("atrim") == 2
+    assert "concat=n=2:v=0:a=1[out]" in filt
+    assert "atempo" not in filt  # both segments are constant-offset -> no stretch needed
+
+
+def test_segment_correction_filter_stretches_a_drift_segment() -> None:
+    segs = [Segment(0.0, 100.0, 0.0, 5.0)]
+    filt = segment_correction_filter(segs, "0:a:1", "out")
+    assert "atempo=1.050000" in filt  # span 105s squeezed into 100s
+
+
+def _apply_jump(bed: np.ndarray, sr: int, jump_time_s: float, delta_s: float) -> np.ndarray:
+    idx = int(jump_time_s * sr)
+    if delta_s > 0:
+        silence = np.zeros(int(delta_s * sr))
+        return np.concatenate([bed[:idx], silence, bed[idx:]])
+    cut = int(-delta_s * sr)
+    return np.concatenate([bed[:idx], bed[idx + cut :]])
+
+
+def _time_stretch(signal: np.ndarray, factor: float) -> np.ndarray:
+    n = len(signal)
+    new_n = int(round(n * factor))
+    old_idx = np.linspace(0, n - 1, new_n)
+    return np.interp(old_idx, np.arange(n), signal)
+
+
+def _mux_two_track_mkv(tmp_path: Path, name: str, ref: np.ndarray, cand: np.ndarray, sr: int, duration_s: float) -> Path:
+    ref_wav = tmp_path / f"{name}_ref.wav"
+    cand_wav = tmp_path / f"{name}_cand.wav"
+    _write_wav(ref_wav, ref, sr)
+    _write_wav(cand_wav, cand, sr)
+
+    mkv = tmp_path / f"{name}.mkv"
+    ffmpeg = resolve_ffmpeg()
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav), "-i", str(cand_wav),
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=fre",
+            "-shortest", str(mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    return mkv
+
+
+def _residual_offset(reference_path: str, candidate_path: str) -> float:
+    ref_pcm = extract_pcm(parse_track_spec(f"{reference_path}@0"), sample_rate=16000)
+    fixed_pcm = extract_pcm(parse_track_spec(f"{candidate_path}@1"), sample_rate=16000)
+    ref_env, frame_rate = extract_envelope(ref_pcm, 16000)
+    fixed_env, _ = extract_envelope(fixed_pcm, 16000)
+    return estimate_offset(ref_env, fixed_env, frame_rate).offset_seconds
+
+
+@pytest.fixture()
+def jump_mkv(tmp_path: Path) -> tuple[Path, float, float]:
+    sr = 44100
+    duration_s = 150.0
+    jump_time_s = 75.0
+    delta_s = 3.0
+
+    bed = _make_bed(duration_s + delta_s, sr, seed=50)
+    reference_bed = bed[: int(duration_s * sr)]
+    candidate_bed = _apply_jump(bed, sr, jump_time_s, delta_s)[: int(duration_s * sr)]
+
+    mkv = _mux_two_track_mkv(tmp_path, "jump", reference_bed, candidate_bed, sr, duration_s)
+    return mkv, jump_time_s, delta_s
+
+
+def test_render_segmented_corrects_a_jump(jump_mkv: tuple[Path, float, float]) -> None:
+    mkv, _jump_time_s, _delta_s = jump_mkv
+    input_path = str(mkv)
+
+    seg_corr = plan_segmented_correction(_spec(mkv, 0), _spec(mkv, 1))
+    assert len(seg_corr.segments) == 2
+
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    written = render(
+        input_path, reference_index=0, corrections=[], output_path=output_path, segmented_corrections=[seg_corr]
+    )
+    assert written == [output_path]
+    assert abs(_residual_offset(input_path, output_path)) < 0.3
+
+
+@pytest.fixture()
+def drift_mkv(tmp_path: Path) -> tuple[Path, float]:
+    sr = 44100
+    duration_s = 150.0
+    stretch_factor = 1.02
+
+    bed = _make_bed(duration_s, sr, seed=60)
+    stretched = _time_stretch(bed, stretch_factor)[: len(bed)]
+
+    mkv = _mux_two_track_mkv(tmp_path, "drift", bed, stretched, sr, duration_s)
+    return mkv, stretch_factor
+
+
+def test_render_segmented_corrects_drift(drift_mkv: tuple[Path, float]) -> None:
+    mkv, _stretch_factor = drift_mkv
+    input_path = str(mkv)
+
+    # Real-content round-tripping (flac encode/decode) can be noisy enough that
+    # the drift gets classified as several piecewise-constant segments rather
+    # than one clean drift segment (see engine README caveats). Either way,
+    # each piece corrects its own local offset, so what actually matters is
+    # the final corrected residual, not how many segments it took.
+    seg_corr = plan_segmented_correction(_spec(mkv, 0), _spec(mkv, 1))
+    assert len(seg_corr.segments) >= 1
+
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    render(input_path, reference_index=0, corrections=[], output_path=output_path, segmented_corrections=[seg_corr])
+    assert abs(_residual_offset(input_path, output_path)) < 0.4
+
+
+@pytest.fixture()
+def segmented_cross_file_fixture(tmp_path: Path) -> tuple[Path, Path, float, float]:
+    """A reference-only mkv, plus a donor mkv (audio + 2 subs) with a jump partway through."""
+    sr = 44100
+    duration_s = 150.0
+    jump_time_s = 75.0
+    delta_s = 3.0
+
+    bed = _make_bed(duration_s + delta_s, sr, seed=70)
+    reference_bed = bed[: int(duration_s * sr)]
+    donor_bed = _apply_jump(bed, sr, jump_time_s, delta_s)[: int(duration_s * sr)]
+
+    ref_wav = tmp_path / "ref.wav"
+    donor_wav = tmp_path / "donor.wav"
+    _write_wav(ref_wav, reference_bed, sr)
+    _write_wav(donor_wav, donor_bed, sr)
+
+    ffmpeg = resolve_ffmpeg()
+    ref_mkv = tmp_path / "reference.mkv"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav),
+            "-map", "0:v", "-map", "1:a",
+            "-metadata:s:a:0", "language=jpn",
+            "-shortest", str(ref_mkv),
+        ],
+        check=True, capture_output=True,
+    )
+
+    # One cue before the jump (candidate-time == reference-time there), one
+    # well after it (candidate-time == reference-time + delta_s there).
+    cue_before_s = 20.0
+    cue_after_s = 110.0
+    srt_path = tmp_path / "donor.srt"
+    _write_srt_multi(srt_path, [(cue_before_s, cue_before_s + 2.0, "Before"), (cue_after_s, cue_after_s + 2.0, "After")])
+
+    donor_mkv = tmp_path / "donor.mkv"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(donor_wav), "-i", str(srt_path),
+            "-map", "0:a", "-map", "1:s",
+            "-metadata:s:a:0", "language=fre",
+            str(donor_mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    return ref_mkv, donor_mkv, cue_before_s, cue_after_s
+
+
+def _extract_srt_start_times(path: str) -> list[float]:
+    ffmpeg = resolve_ffmpeg()
+    out = Path(path).with_suffix(".extracted.srt")
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", path, "-map", "0:s:0", str(out)],
+        check=True, capture_output=True,
+    )
+    times = []
+    for line in out.read_text(encoding="utf-8").splitlines():
+        if "-->" in line:
+            start_str = line.split(" --> ")[0]
+            h, m, rest = start_str.split(":")
+            s, ms = rest.split(",")
+            times.append(int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000)
+    return times
+
+
+def test_render_segmented_rewrites_imported_subtitle_timestamps(
+    segmented_cross_file_fixture: tuple[Path, Path, float, float],
+) -> None:
+    ref_mkv, donor_mkv, cue_before_s, cue_after_s = segmented_cross_file_fixture
+    delta_s = 3.0  # matches segmented_cross_file_fixture's jump size
+
+    donor_audio = _spec(donor_mkv, 0)
+    donor_subs = _spec(donor_mkv, 0)
+
+    seg_corr = plan_segmented_correction(_spec(ref_mkv, 0), donor_audio)
+    assert len(seg_corr.segments) == 2
+
+    output_path = str(ref_mkv.with_name("out.synced.mkv"))
+    render(
+        str(ref_mkv),
+        reference_index=0,
+        corrections=[],
+        output_path=output_path,
+        segmented_corrections=[seg_corr],
+        segmented_imported_subs=[(donor_subs, seg_corr.segments)],
+    )
+
+    starts = _extract_srt_start_times(output_path)
+    assert len(starts) == 2
+    # The "before" cue sits in the unshifted segment -> unchanged; the
+    # "after" cue sits past the jump, where the candidate lags by delta_s,
+    # so its subtitle (timed to the delayed audio) is pulled back by delta_s
+    # to land on the corrected (de-delayed) output -- same direction the
+    # audio itself was shifted.
+    assert abs(starts[0] - cue_before_s) < 0.3
+    assert abs(starts[1] - (cue_after_s - delta_s)) < 0.3
+
+
+@pytest.fixture()
+def offset_mkv_with_native_subs(tmp_path: Path) -> tuple[Path, float, float]:
+    """Like offset_mkv, but with a subtitle track already inside the same file, paired with track 1."""
+    sr = 44100
+    duration_s = 30.0
+    offset_s = 3.0
+    cue_start_s = 10.0
+
+    bed = _make_bed(duration_s, sr, seed=90)
+    shifted = np.concatenate([np.zeros(int(offset_s * sr)), bed])[: len(bed)]
+
+    ref_wav = tmp_path / "ref.wav"
+    cand_wav = tmp_path / "cand.wav"
+    _write_wav(ref_wav, bed, sr)
+    _write_wav(cand_wav, shifted, sr)
+    srt_path = tmp_path / "cand.srt"
+    _write_srt(srt_path, cue_start_s, cue_start_s + 2.0, "Native cue")
+
+    mkv = tmp_path / "with_native_subs.mkv"
+    ffmpeg = resolve_ffmpeg()
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav), "-i", str(cand_wav), "-i", str(srt_path),
+            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
+            "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=fre",
+            "-shortest", str(mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    return mkv, offset_s, cue_start_s
+
+
+def test_render_native_subs_pairing_does_not_duplicate_the_track(
+    offset_mkv_with_native_subs: tuple[Path, float, float],
+) -> None:
+    """Regression test: pairing a subtitle track already in INPUT with a --track correction
+
+    used to also get swept up by the generic "every subtitle in INPUT" mapping, producing
+    both a shifted *and* an unshifted copy of the same track in the output.
+    """
+    mkv, offset_s, cue_start_s = offset_mkv_with_native_subs
+    input_path = str(mkv)
+
+    # A known, fixed offset instead of plan_corrections' own detection: this
+    # test is about render()'s subtitle-pairing mechanics (no duplicate
+    # track, correct shift applied), not about re-proving detection
+    # accuracy (covered elsewhere) -- decoupling the two keeps it from being
+    # a flaky proxy for "did this particular synthetic clip correlate well".
+    cand_spec = _spec(mkv, 1)
+    correction = TrackCorrection(track=cand_spec, language="fre", offset_seconds=offset_s, confidence=1.0, ambiguous=False)
+    subs_spec = _spec(mkv, 0)  # the only subtitle stream in the file
+
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    render(
+        input_path,
+        reference_index=0,
+        corrections=[correction],
+        output_path=output_path,
+        imported_subs=[(subs_spec, offset_s)],
+    )
+
+    assert len(probe_audio_streams(output_path)) == 2
+
+    ffmpeg = resolve_ffmpeg()
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-i", output_path], capture_output=True, text=True)
+    subtitle_lines = [line for line in proc.stderr.splitlines() if "Subtitle" in line]
+    assert len(subtitle_lines) == 1
+
+    starts = _extract_srt_start_times(output_path)
+    assert len(starts) == 1
+    assert abs(starts[0] - (cue_start_s - offset_s)) < 0.3

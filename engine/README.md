@@ -69,7 +69,10 @@ Autres options utiles :
 - `--dry-run` : affiche le décalage détecté et la correction prévue sans rien écrire.
 - `--audio-only` : exporte uniquement la/les piste(s) corrigée(s) en `.flac` (`<sortie>.<fichier>.trackN.flac`) au lieu de remuxer un MKV complet.
 - `-o/--output` : chemin de sortie (défaut : `<INPUT>.synced.mkv`).
-- `--only-imports` : n'inclut aucune piste de INPUT à part la référence (utile avec `--import-audio`/`--import-subs` ci-dessous, pour ne pas dupliquer une piste déjà présente dans INPUT).
+- `--only-imports` : n'inclut aucune piste de INPUT à part la référence (utile avec `--import-audio`/`--subs` ci-dessous, pour ne pas dupliquer une piste déjà présente dans INPUT).
+- `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
+
+Par défaut, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent. Pour ces cas, voir `segments` (détection) et `render --segmented` (correction) plus bas.
 
 ### Injecter des pistes d'un autre fichier
 
@@ -78,13 +81,59 @@ Pour ajouter, resynchronisée, une piste venant d'un **second** fichier (ex. inj
 ```
 uv run syncaudio render vo.mkv --reference 0 --only-imports \
   --import-audio vf.mkv@1 \
-  --import-subs vf.mkv@2
+  --subs vf.mkv@2=vf.mkv@1
 ```
 
-`--import-audio` (répétable) ajoute une piste audio d'un autre fichier, décalage détecté et corrigé automatiquement comme pour `--track`. `--import-subs` (répétable) ajoute une piste de sous-titres d'un autre fichier : contrairement à l'audio, on ne peut pas « couper »/« combler » du texte, donc ses horodatages sont simplement translatés du même montant que le décalage audio détecté — ce qui impose d'avoir **exactement un** `--import-audio` pour en déduire ce décalage (aucune détection séparée pour les sous-titres seuls pour l'instant).
-- `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
+`--import-audio` (répétable) ajoute une piste audio d'un autre fichier, décalage détecté et corrigé automatiquement comme pour `--track`.
 
-Comme `align`, `render` suppose un décalage **constant** sur toute la piste — pas de dérive de vitesse ni de montage différent (voir « Limites connues » plus haut ; la détection de dérive/sauts est prévue pour une prochaine version).
+### Associer des sous-titres à une piste audio précise (`--subs`)
+
+`--subs SPEC=AUDIO_SPEC` (répétable) ajoute une piste de sous-titres décalée **exactement comme** la piste audio `AUDIO_SPEC` désignée — utile quand on sait qu'une piste audio et ses sous-titres sont déjà synchro entre eux (même si mal synchro avec la référence), pour leur appliquer le même traitement plutôt que de deviner. `SPEC` peut venir de INPUT ou d'un autre fichier ; `AUDIO_SPEC` doit désigner exactement une piste déjà corrigée via `--track` ou `--import-audio` (même `fichier@index`) — sinon erreur claire. Plusieurs `--subs` peuvent pointer vers des pistes audio différentes.
+
+Exemple avec une piste et ses sous-titres tous deux déjà dans INPUT :
+
+```
+uv run syncaudio render film.mkv --reference 0 --track 1 --subs film.mkv@2=film.mkv@1
+```
+
+Contrairement à l'audio, on ne peut pas « couper »/« combler » du texte : en mode non-segmenté, les horodatages sont simplement translatés du même montant que le décalage audio détecté ; en mode `--segmented`, ils sont individuellement réécrits selon le segment auquel chaque réplique appartient (voir plus bas).
+
+## Détecter une dérive ou des sauts (`segments`)
+
+`align` et `render` supposent un décalage **constant** sur toute la piste. `segments` lève cette hypothèse : il fait glisser une fenêtre d'analyse sur toute la piste et rapporte comment le décalage évolue dans le temps, sans rien corriger ni écrire :
+
+```
+uv run syncaudio segments film.mkv --reference 0 --track 1
+```
+
+Affiche un ou plusieurs segments, chacun avec un décalage de début/fin :
+- même valeur aux deux bouts → décalage **constant** sur ce segment.
+- valeurs différentes → **dérive** progressive sur ce segment (vitesse légèrement différente).
+- plusieurs segments avec un saut net entre eux → montage différent à cet instant.
+
+Quand plusieurs segments sont détectés, chaque frontière est automatiquement raffinée par une seconde passe locale (fenêtre bien plus petite, uniquement autour de la transition) pour la localiser plus précisément que la passe grossière seule.
+
+Options : `--window`/`--hop` (taille/pas de la fenêtre glissante, secondes), `--margin` (décalage local max recherché par fenêtre), `--json` (sortie machine, fenêtres brutes + segments classifiés), `--start`/`--duration` comme pour `align`.
+
+Pour corriger ce que `segments` a détecté (pas juste le visualiser), voir `render --segmented` ci-dessous.
+
+Limites connues à ce stade :
+- La précision de localisation d'un saut dépend de la richesse en musique/bruitages du contenu *juste autour* de la transition, pas seulement de la taille de fenêtre : sur une zone plutôt silencieuse/dialoguée à cet instant précis, même la passe de raffinement peut rester à plusieurs secondes de l'instant réel (vu sur `jump_single`, un cas par ailleurs propre — la correction finale reste malgré tout très bonne, voir ci-dessous).
+- Sur des cas avec plusieurs sauts rapprochés, un segment isolé parasite peut occasionnellement apparaître près d'une transition (vu sur `jump_multi`).
+
+## Corriger une dérive ou des sauts (`render --segmented`)
+
+`render` sans `--segmented` suppose un décalage constant partout (voir plus haut). Avec `--segmented`, il détecte d'abord les segments (même pipeline que `segments`, raffinage compris), puis corrige **chaque segment indépendamment** :
+
+```
+uv run syncaudio render film.mkv --reference 0 --track 1 --segmented
+```
+
+Pour chaque segment, la portion correspondante de la piste candidate (son propre intervalle, décalé par l'offset de *ce* segment) est extraite, puis retimée avec `atempo` pour occuper exactement la durée du segment de référence — un facteur de 1 (aucun effet) quand le segment est à décalage constant, un facteur différent de 1 quand c'est une dérive : c'est la même formule dans les deux cas, pas un traitement séparé. Les segments corrigés sont ensuite concaténés bout à bout, ce qui reconstitue exactement la timeline de la référence. Options `--window`/`--hop`/`--margin` comme pour `segments`.
+
+Sur nos fixtures de test : une dérive de +3.4s en fin de piste retombe à un résidu quasi constant (~0.2s) après correction ; un saut nettement détecté (même avec une frontière imprécise de quelques secondes) redonne un flux parfaitement synchro après correction, l'imprécision de frontière n'affectant qu'une poignée de secondes autour de la transition elle-même.
+
+`--segmented` se combine aussi avec `--subs` : les horodatages de chaque réplique sont individuellement réécrits selon le segment auquel ils appartiennent (pas un simple décalage global comme en mode non-segmenté), donc une réplique après un saut ou en pleine dérive atterrit correctement. Formats de sous-titres supportés : SRT et ASS/SSA (les plus courants) ; un autre format donne une erreur claire plutôt qu'un résultat silencieusement faux.
 
 ### Accélérer sur de gros fichiers
 

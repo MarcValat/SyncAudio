@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import time
@@ -11,7 +12,16 @@ from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
 from syncaudio.ffmpeg_backend import FFmpegError, extract_pcm, parse_track_spec, probe_audio_streams
 from syncaudio.models import AudioTrackSpec
-from syncaudio.render import plan_corrections, render as render_tracks
+from syncaudio.render import plan_corrections, plan_segmented_correction, render as render_tracks
+from syncaudio.segments import (
+    DEFAULT_HOP_S,
+    DEFAULT_MARGIN_S,
+    DEFAULT_WINDOW_S,
+    Segment,
+    classify_segments,
+    refine_segments,
+    windowed_offsets,
+)
 
 
 def _log(message: str, quiet: bool) -> None:
@@ -157,7 +167,7 @@ def align(
 @click.option(
     "--only-imports",
     is_flag=True,
-    help="N'inclut aucune piste de INPUT à part la référence (seules les --import-audio/--import-subs sont ajoutées).",
+    help="N'inclut aucune piste de INPUT à part la référence (seules les --import-audio/--subs sont ajoutées).",
 )
 @click.option(
     "--import-audio",
@@ -166,12 +176,15 @@ def align(
     help="Piste audio d'un AUTRE fichier à ajouter, resynchronisée automatiquement (chemin ou chemin@INDEX, répétable).",
 )
 @click.option(
-    "--import-subs",
-    "import_subs",
+    "--subs",
+    "subs_pairs",
     multiple=True,
+    metavar="SPEC=AUDIO_SPEC",
     help=(
-        "Piste de sous-titres d'un AUTRE fichier à ajouter (chemin ou chemin@INDEX, répétable) ; "
-        "décalée du même montant que l'unique --import-audio fourni (requis pour en déduire le décalage)."
+        "Piste de sous-titres à ajouter, décalée EXACTEMENT comme la piste audio AUDIO_SPEC (répétable). "
+        "SPEC peut venir de INPUT ou d'un autre fichier ; AUDIO_SPEC doit désigner une piste corrigée via "
+        "--track ou --import-audio (même fichier@index). Ex. : --subs vf.mkv@2=vf.mkv@1 "
+        "ou, pour une piste déjà dans INPUT : --subs film.mkv@3=film.mkv@1."
     ),
 )
 @click.option("-o", "--output", "output_path", default=None, help="Fichier de sortie. Défaut : <INPUT>.synced.mkv")
@@ -179,6 +192,23 @@ def align(
     "--audio-only",
     is_flag=True,
     help="N'exporte que la/les piste(s) corrigée(s) en .flac, sans remuxer de MKV.",
+)
+@click.option(
+    "--segmented",
+    is_flag=True,
+    help=(
+        "Corrige aussi la dérive progressive et les sauts nets, pas seulement un décalage constant "
+        "(voir `segments` pour visualiser d'abord ce qui sera fait)."
+    ),
+)
+@click.option("--window", "window_s", default=DEFAULT_WINDOW_S, show_default=True, help="Avec --segmented : taille de fenêtre d'analyse (s).")
+@click.option("--hop", "hop_s", default=DEFAULT_HOP_S, show_default=True, help="Avec --segmented : pas entre fenêtres (s).")
+@click.option(
+    "--margin",
+    "margin_s",
+    default=DEFAULT_MARGIN_S,
+    show_default=True,
+    help="Avec --segmented : décalage local max recherché par fenêtre (s).",
 )
 @click.option("--dry-run", is_flag=True, help="Détecte et affiche la correction prévue sans rien écrire.")
 @click.option(
@@ -200,22 +230,29 @@ def render(
     track_indices: tuple[int, ...],
     only_imports: bool,
     import_audio: tuple[str, ...],
-    import_subs: tuple[str, ...],
+    subs_pairs: tuple[str, ...],
     output_path: str | None,
     audio_only: bool,
+    segmented: bool,
+    window_s: float,
+    hop_s: float,
+    margin_s: float,
     dry_run: bool,
     start: float,
     duration: float | None,
     quiet: bool,
 ) -> None:
-    """Corrige le décalage constant de pistes de INPUT par rapport à --reference.
+    """Corrige le décalage de pistes de INPUT par rapport à --reference.
 
     INPUT est un seul fichier conteneur (ex. mkv) avec plusieurs pistes
-    audio ; --import-audio/--import-subs permettent d'y ajouter des pistes
-    venant d'un AUTRE fichier (ex. injecter la piste audio + sous-titres
-    d'un mkv VF dans un mkv VO), resynchronisées automatiquement. Ne gère
-    que le cas décalage constant (pas de dérive ni de sauts) ; voir le
-    README pour les limites.
+    audio ; --import-audio permet d'y ajouter une piste venant d'un AUTRE
+    fichier, resynchronisée automatiquement (ex. injecter l'audio d'un mkv
+    VF dans un mkv VO). --subs ajoute une piste de sous-titres (de INPUT ou
+    d'un autre fichier) décalée exactement comme une piste audio corrigée
+    donnée, ex. quand on sait que la piste 2 et ses sous-titres sont déjà
+    synchro entre eux. Par défaut ne gère que le cas décalage constant ;
+    --segmented gère aussi la dérive et les sauts. Voir le README pour les
+    limites.
     """
     try:
         streams = probe_audio_streams(input_path)
@@ -242,7 +279,6 @@ def render(
 
     try:
         import_audio_specs = [parse_track_spec(s) for s in import_audio]
-        import_subs_specs = [parse_track_spec(s) for s in import_subs]
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -255,14 +291,97 @@ def render(
         if idx not in ext_streams:
             raise click.ClickException(f"Index audio {idx} absent de {spec.path!r} (pistes : {sorted(ext_streams)}).")
 
-    if import_subs_specs and len(import_audio_specs) != 1:
-        raise click.ClickException(
-            "--import-subs nécessite exactement un --import-audio, pour en déduire le décalage à appliquer aux sous-titres."
-        )
+    def _track_key(spec: AudioTrackSpec) -> tuple[str, int]:
+        idx = spec.stream_index if spec.stream_index is not None else 0
+        return (str(Path(spec.path).resolve()), idx)
+
+    subs_specs: list[AudioTrackSpec] = []
+    subs_audio_keys: list[tuple[str, int]] = []
+    for raw in subs_pairs:
+        subs_raw, sep, audio_raw = raw.partition("=")
+        if not sep:
+            raise click.ClickException(
+                f"--subs {raw!r} invalide : syntaxe attendue SPEC=AUDIO_SPEC (ex. vf.mkv@2=vf.mkv@1)."
+            )
+        try:
+            subs_specs.append(parse_track_spec(subs_raw))
+            subs_audio_keys.append(_track_key(parse_track_spec(audio_raw)))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     reference_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
     same_file_specs = [AudioTrackSpec(raw=f"{input_path}@{i}", path=input_path, stream_index=i) for i in targets]
     candidates = same_file_specs + import_audio_specs
+    candidate_keys = [_track_key(c) for c in candidates]
+
+    for raw, key in zip(subs_pairs, subs_audio_keys):
+        if key not in candidate_keys:
+            raise click.ClickException(
+                f"--subs {raw!r} : la piste audio indiquée ne correspond à aucune piste corrigée "
+                "(doit être l'un des --track ou --import-audio, même fichier@index)."
+            )
+
+    if segmented:
+        try:
+            seg_corrections = [
+                plan_segmented_correction(
+                    reference_spec,
+                    spec,
+                    start=start,
+                    duration=duration,
+                    window_s=window_s,
+                    hop_s=hop_s,
+                    margin_s=margin_s,
+                    log=lambda m: _log(m, quiet),
+                )
+                for spec in candidates
+            ]
+        except FFmpegError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        for sc in seg_corrections:
+            click.echo(f"  {sc.track.raw:<30} (langue={sc.language or '?'})")
+            for seg in sc.segments:
+                kind = "dérive  " if seg.is_drift else "constant"
+                click.echo(
+                    f"      [{seg.start_s:7.1f}s -> {seg.end_s:7.1f}s]  {kind}  "
+                    f"offset {seg.offset_start:+7.3f}s -> {seg.offset_end:+7.3f}s"
+                )
+
+        segmented_imported_subs: list[tuple[AudioTrackSpec, list[Segment]]] = []
+        for subs_spec, key in zip(subs_specs, subs_audio_keys):
+            pos = candidate_keys.index(key)
+            segmented_imported_subs.append((subs_spec, seg_corrections[pos].segments))
+            click.echo(
+                f"  {subs_spec.raw:<30} (sous-titres)  horodatages réécrits selon les mêmes segments que {candidates[pos].raw}"
+            )
+
+        if dry_run:
+            click.echo("[dry-run] rien écrit.")
+            return
+
+        if output_path is None:
+            stem = Path(input_path)
+            while stem.suffix:
+                stem = stem.with_suffix("")
+            output_path = str(stem) + ".synced.mkv"
+
+        try:
+            written = render_tracks(
+                input_path,
+                reference_index,
+                corrections=[],
+                output_path=output_path,
+                audio_only=audio_only,
+                segmented_corrections=seg_corrections,
+                segmented_imported_subs=segmented_imported_subs,
+            )
+        except FFmpegError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        for path in written:
+            click.echo(f"Écrit : {path}")
+        return
 
     try:
         corrections = plan_corrections(
@@ -281,11 +400,11 @@ def render(
         click.echo(f"  {corr.track.raw:<30} (langue={corr.language or '?'})  {action}  confiance={corr.confidence:.2f}{flag}")
 
     imported_subs: list[tuple[AudioTrackSpec, float]] = []
-    if import_subs_specs:
-        subs_offset = corrections[len(same_file_specs)].offset_seconds
-        imported_subs = [(spec, subs_offset) for spec in import_subs_specs]
-        for spec in import_subs_specs:
-            click.echo(f"  {spec.raw:<30} (sous-titres)  décalés de {-subs_offset:+.3f}s (alignés sur l'audio importé)")
+    for subs_spec, key in zip(subs_specs, subs_audio_keys):
+        pos = candidate_keys.index(key)
+        offset = corrections[pos].offset_seconds
+        imported_subs.append((subs_spec, offset))
+        click.echo(f"  {subs_spec.raw:<30} (sous-titres)  décalés de {-offset:+.3f}s (alignés sur {candidates[pos].raw})")
 
     if dry_run:
         click.echo("[dry-run] rien écrit.")
@@ -306,6 +425,85 @@ def render(
 
     for path in written:
         click.echo(f"Écrit : {path}")
+
+
+@cli.command()
+@click.argument("input_path", metavar="INPUT")
+@click.option("--reference", "reference_index", required=True, type=int, help="Index de la piste de référence.")
+@click.option("--track", "track_index", required=True, type=int, help="Index de la piste à analyser.")
+@click.option("--window", "window_s", default=DEFAULT_WINDOW_S, show_default=True, help="Taille de fenêtre d'analyse (s).")
+@click.option("--hop", "hop_s", default=DEFAULT_HOP_S, show_default=True, help="Pas entre fenêtres successives (s).")
+@click.option(
+    "--margin",
+    "margin_s",
+    default=DEFAULT_MARGIN_S,
+    show_default=True,
+    help="Décalage local maximum recherché autour de zéro, par fenêtre (s).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Sortie au format JSON (fenêtres + segments).")
+@click.option("--start", default=0.0, show_default=True, help="Ignore les START premières secondes de chaque piste.")
+@click.option("--duration", default=None, type=float, help="N'analyse que les DURATION secondes suivant --start.")
+@click.option("-q", "--quiet", is_flag=True, help="Ne pas afficher la progression sur stderr.")
+def segments(
+    input_path: str,
+    reference_index: int,
+    track_index: int,
+    window_s: float,
+    hop_s: float,
+    margin_s: float,
+    as_json: bool,
+    start: float,
+    duration: float | None,
+    quiet: bool,
+) -> None:
+    """Détecte comment le décalage entre --track et --reference change dans le temps.
+
+    Contrairement à `align` (un seul décalage global) et `render` (le
+    corrige en le supposant constant), `segments` révèle une dérive
+    progressive ou des sauts nets — utile pour comprendre CE cas avant de
+    décider comment le corriger. Ne modifie ni n'écrit aucun fichier.
+    """
+    sample_rate = 16000
+    try:
+        ref_spec = AudioTrackSpec(raw=f"{input_path}@{reference_index}", path=input_path, stream_index=reference_index)
+        track_spec = AudioTrackSpec(raw=f"{input_path}@{track_index}", path=input_path, stream_index=track_index)
+
+        _log(f"[extraction] référence @{reference_index} ...", quiet)
+        ref_pcm = extract_pcm(ref_spec, sample_rate=sample_rate, start=start or None, duration=duration)
+        ref_env, frame_rate = extract_envelope(ref_pcm, sample_rate)
+
+        _log(f"[extraction] piste @{track_index} ...", quiet)
+        cand_pcm = extract_pcm(track_spec, sample_rate=sample_rate, start=start or None, duration=duration)
+        cand_env, _ = extract_envelope(cand_pcm, sample_rate)
+    except FFmpegError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    total_duration_s = len(ref_pcm) / sample_rate
+
+    _log("[analyse] fenêtres glissantes...", quiet)
+    windows = windowed_offsets(ref_env, cand_env, frame_rate, window_s=window_s, hop_s=hop_s, margin_s=margin_s)
+    segs = classify_segments(windows, total_duration_s)
+    if len(segs) > 1:
+        _log("[analyse] affinage des frontières...", quiet)
+        segs = refine_segments(ref_env, cand_env, frame_rate, segs)
+
+    if as_json:
+        payload = {
+            "reference": ref_spec.raw,
+            "track": track_spec.raw,
+            "total_duration_s": total_duration_s,
+            "windows": [dataclasses.asdict(w) for w in windows],
+            "segments": [dict(dataclasses.asdict(s), is_drift=s.is_drift) for s in segs],
+        }
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    click.echo(f"Référence : {ref_spec.raw}  |  Piste : {track_spec.raw}  ({total_duration_s:.1f}s analysées)")
+    for s in segs:
+        kind = "dérive  " if s.is_drift else "constant"
+        click.echo(
+            f"  [{s.start_s:7.1f}s -> {s.end_s:7.1f}s]  {kind}  offset {s.offset_start:+7.3f}s -> {s.offset_end:+7.3f}s"
+        )
 
 
 def main() -> None:
