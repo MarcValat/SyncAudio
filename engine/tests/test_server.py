@@ -69,6 +69,12 @@ def offset_mkv(tmp_path: Path) -> tuple[Path, float]:
     return mkv, offset_s
 
 
+def test_health() -> None:
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
 def test_probe_lists_tracks(offset_mkv: tuple[Path, float]) -> None:
     mkv, _ = offset_mkv
     resp = client.get("/probe", params={"path": str(mkv)})
