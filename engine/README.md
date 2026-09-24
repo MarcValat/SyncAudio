@@ -148,10 +148,20 @@ N'analyse ici que les 10 minutes commençant à 5 minutes (utile pour sauter un 
 - L'extrait doit contenir un minimum d'activité musique/bruitages (une scène uniquement silencieuse ou dialoguée donnera une confiance faible).
 - Par défaut, seuls les décalages allant jusqu'à ~10 % de la durée de l'extrait sont recherchés (voir « Limites connues » ci-dessus) : avec `--duration 600`, un décalage réel de plus d'environ 60s ne sera pas trouvé. Si le décalage attendu est plus grand, augmentez `--duration` en conséquence.
 
+## Sidecar HTTP (`serve`)
+
+Expose le même moteur (`probe`/`align`/`segments`/`render`) en HTTP, pour un futur client autre que le CLI (le GUI, notamment) :
+
+```
+uv run syncaudio serve
+```
+
+Démarre sur `http://127.0.0.1:8756` par défaut (`--host`/`--port` pour changer). Docs interactives (Swagger) sur `/docs` une fois lancé — pratique pour explorer les endpoints à la main. `POST /render` reprend les mêmes options que la commande `render` (dont `segmented`, `import_audio`, `subs`) en JSON plutôt qu'en flags. Endpoints synchrones pour l'instant (une requête `render` bloque le temps du traitement) ; le streaming de progression viendra plus tard.
+
 ## Développement
 
 ```
 uv run pytest
 ```
 
-`tests/test_align.py` valide l'algorithme sur des signaux synthétiques (sans ffmpeg). `tests/test_ffmpeg_backend.py` valide l'extraction/probe de bout en bout avec le ffmpeg embarqué.
+`tests/test_align.py` valide l'algorithme sur des signaux synthétiques (sans ffmpeg). `tests/test_ffmpeg_backend.py` valide l'extraction/probe de bout en bout avec le ffmpeg embarqué. `tests/test_server.py` valide le sidecar HTTP avec `fastapi.testclient`.

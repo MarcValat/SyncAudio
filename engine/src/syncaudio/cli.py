@@ -506,6 +506,21 @@ def segments(
         )
 
 
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Adresse d'écoute.")
+@click.option("--port", default=8756, show_default=True, type=int, help="Port d'écoute.")
+def serve(host: str, port: int) -> None:
+    """Lance le sidecar HTTP (probe/align/segments/render) pour un futur GUI.
+
+    Couche fine au-dessus du même moteur que le CLI ; le CLI reste
+    utilisable indépendamment. Docs interactives sur /docs une fois lancé.
+    """
+    import uvicorn
+
+    click.echo(f"SyncAudio sidecar sur http://{host}:{port} (docs : /docs)", err=True)
+    uvicorn.run("syncaudio.server:app", host=host, port=port)
+
+
 def main() -> None:
     try:
         cli()
