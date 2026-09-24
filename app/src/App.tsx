@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   checkHealth,
@@ -12,28 +12,31 @@ import "./App.css";
 
 type EngineStatus = "starting" | "ready" | "unreachable";
 
+const HEALTH_POLL_ATTEMPTS = 40; // 40 * 500ms = 20s before giving up
+
 function App() {
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("starting");
   const [filePath, setFilePath] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TrackInfo[] | null>(null);
   const [referenceIndex, setReferenceIndex] = useState<number | null>(null);
-  const [targetIndex, setTargetIndex] = useState<number | null>(null);
+  const [targetIndices, setTargetIndices] = useState<number[]>([]);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [result, setResult] = useState<AlignResponse | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const pollHealth = useCallback(() => {
     let cancelled = false;
     let attempts = 0;
+    setEngineStatus("starting");
     async function poll() {
       if (await checkHealth()) {
         if (!cancelled) setEngineStatus("ready");
         return;
       }
       attempts += 1;
-      if (attempts > 40) {
+      if (attempts > HEALTH_POLL_ATTEMPTS) {
         if (!cancelled) setEngineStatus("unreachable");
         return;
       }
@@ -45,6 +48,8 @@ function App() {
     };
   }, []);
 
+  useEffect(() => pollHealth(), [pollHealth]);
+
   async function handleOpenFile() {
     const selected = await open({
       multiple: false,
@@ -55,7 +60,7 @@ function App() {
     setFilePath(selected);
     setTracks(null);
     setReferenceIndex(null);
-    setTargetIndex(null);
+    setTargetIndices([]);
     setResult(null);
     setLogLines([]);
     setDetectError(null);
@@ -66,21 +71,33 @@ function App() {
       setTracks(res.tracks);
       if (res.tracks.length >= 2) {
         setReferenceIndex(res.tracks[0].index);
-        setTargetIndex(res.tracks[1].index);
+        setTargetIndices(res.tracks.slice(1).map((t) => t.index));
       }
     } catch (err) {
       setProbeError(err instanceof Error ? err.message : String(err));
     }
   }
 
+  function handleReferenceChange(index: number) {
+    setReferenceIndex(index);
+    // A track can't be both the reference and something to correct.
+    setTargetIndices((current) => current.filter((i) => i !== index));
+  }
+
+  function toggleTarget(index: number) {
+    setTargetIndices((current) =>
+      current.includes(index) ? current.filter((i) => i !== index) : [...current, index],
+    );
+  }
+
   async function handleDetect() {
-    if (!filePath || referenceIndex === null || targetIndex === null) return;
+    if (!filePath || referenceIndex === null || targetIndices.length === 0) return;
     setDetecting(true);
     setDetectError(null);
     setResult(null);
     setLogLines([]);
     try {
-      const jobId = await startAlignJob(filePath, referenceIndex, filePath, targetIndex);
+      const jobId = await startAlignJob(filePath, referenceIndex, filePath, targetIndices);
       connectJobWS(jobId, (event) => {
         if (event.type === "log") {
           setLogLines((lines) => [...lines, event.message]);
@@ -104,9 +121,15 @@ function App() {
 
       {engineStatus !== "ready" && (
         <p className="engine-status">
-          {engineStatus === "starting"
-            ? "Démarrage du moteur..."
-            : "Moteur injoignable — le sidecar a-t-il démarré ? (voir la console)"}
+          {engineStatus === "starting" ? (
+            "Démarrage du moteur..."
+          ) : (
+            <>
+              Moteur injoignable — le sidecar a-t-il démarré ? (voir la console)
+              <br />
+              <button onClick={pollHealth}>Réessayer</button>
+            </>
+          )}
         </p>
       )}
 
@@ -116,7 +139,11 @@ function App() {
       {filePath && <p className="file-path">{filePath}</p>}
       {probeError && <p className="error">{probeError}</p>}
 
-      {tracks && (
+      {tracks && tracks.length < 2 && (
+        <p className="error">Ce fichier n'a qu'une seule piste audio : rien à comparer.</p>
+      )}
+
+      {tracks && tracks.length >= 2 && (
         <div className="tracks">
           <table>
             <thead>
@@ -139,16 +166,15 @@ function App() {
                       type="radio"
                       name="reference"
                       checked={referenceIndex === t.index}
-                      onChange={() => setReferenceIndex(t.index)}
+                      onChange={() => handleReferenceChange(t.index)}
                     />
                   </td>
                   <td>
                     <input
-                      type="radio"
-                      name="target"
+                      type="checkbox"
                       disabled={referenceIndex === t.index}
-                      checked={targetIndex === t.index}
-                      onChange={() => setTargetIndex(t.index)}
+                      checked={targetIndices.includes(t.index)}
+                      onChange={() => toggleTarget(t.index)}
                     />
                   </td>
                 </tr>
@@ -156,12 +182,7 @@ function App() {
             </tbody>
           </table>
 
-          <button
-            onClick={handleDetect}
-            disabled={
-              detecting || referenceIndex === null || targetIndex === null || referenceIndex === targetIndex
-            }
-          >
+          <button onClick={handleDetect} disabled={detecting || referenceIndex === null || targetIndices.length === 0}>
             {detecting ? "Détection en cours..." : "Détecter le décalage"}
           </button>
         </div>
@@ -175,7 +196,7 @@ function App() {
         <div className="result">
           {result.results.map((r) => (
             <p key={r.track}>
-              Décalage détecté : <strong>{r.offset_seconds.toFixed(3)}s</strong>
+              {r.track} : décalage <strong>{r.offset_seconds.toFixed(3)}s</strong>
               {r.ambiguous ? " (ambigu)" : ""}
             </p>
           ))}
