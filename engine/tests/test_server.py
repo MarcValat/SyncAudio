@@ -151,6 +151,30 @@ def test_clip_endpoint_missing_file_returns_400() -> None:
     assert resp.status_code == 400
 
 
+def test_waveform_endpoint_returns_bucketed_peaks(offset_mkv: tuple[Path, float]) -> None:
+    mkv, _ = offset_mkv
+    resp = client.get("/waveform", params={"path": str(mkv), "index": 0, "buckets": 40})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["peaks_min"]) == 40
+    assert len(body["peaks_max"]) == 40
+    assert abs(body["duration"] - 30.0) < 0.5  # offset_mkv is a 30s fixture
+
+
+def test_waveform_endpoint_windowed(offset_mkv: tuple[Path, float]) -> None:
+    mkv, _ = offset_mkv
+    resp = client.get("/waveform", params={"path": str(mkv), "index": 0, "start": 5.0, "duration": 2.0, "buckets": 20})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["peaks_min"]) == 20
+    assert abs(body["duration"] - 2.0) < 0.2
+
+
+def test_waveform_endpoint_missing_file_returns_400() -> None:
+    resp = client.get("/waveform", params={"path": "does-not-exist.mkv", "index": 0})
+    assert resp.status_code == 400
+
+
 def test_render_endpoint_writes_a_corrected_file(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
     output_path = str(mkv.with_name("out.synced.mkv"))

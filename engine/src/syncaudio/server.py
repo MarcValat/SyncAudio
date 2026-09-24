@@ -30,7 +30,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
-from syncaudio.ffmpeg_backend import FFmpegError, extract_wav_clip, probe_audio_streams
+from syncaudio.ffmpeg_backend import FFmpegError, extract_peaks, extract_wav_clip, probe_audio_streams
 from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
@@ -172,6 +172,30 @@ def clip(path: str, index: int, start: float = 0.0, duration: float = 12.0) -> R
     except FFmpegError as exc:
         raise _http_error(exc) from exc
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+class WaveformResponse(BaseModel):
+    duration: float
+    peaks_min: list[float]
+    peaks_max: list[float]
+
+
+@app.get("/waveform", response_model=WaveformResponse)
+def waveform(path: str, index: int, start: float = 0.0, duration: float | None = None, buckets: int = 800) -> WaveformResponse:
+    """Downsampled (min, max) waveform envelope for a track window, for the GUI's
+    always-visible, zoomable comparison view (see TrackPreview.tsx/Waveform.tsx).
+
+    Unlike ``/clip``, this never ships audio samples -- just ``buckets`` pairs
+    of floats -- so it stays cheap even for a whole multi-minute track at
+    once (``duration`` omitted), which is how the GUI learns a track's total
+    duration for its initial, fully-zoomed-out view.
+    """
+    spec = AudioTrackSpec(raw=f"{path}@{index}", path=path, stream_index=index)
+    try:
+        mins, maxes, actual_duration = extract_peaks(spec, buckets, start=max(0.0, start), duration=duration)
+    except FFmpegError as exc:
+        raise _http_error(exc) from exc
+    return WaveformResponse(duration=actual_duration, peaks_min=mins.tolist(), peaks_max=maxes.tolist())
 
 
 class PrefetchRequest(BaseModel):

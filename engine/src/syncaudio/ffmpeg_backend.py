@@ -183,6 +183,37 @@ def extract_pcm(
     return pcm.astype(np.float32) / 32768.0
 
 
+_PEAKS_SAMPLE_RATE = 22050
+
+
+def extract_peaks(
+    spec: AudioTrackSpec, buckets: int, start: float = 0.0, duration: float | None = None
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Per-bucket (min, max) amplitude envelope of a track window, for drawing a waveform.
+
+    Returns ``(mins, maxes, actual_duration)`` -- ``actual_duration`` is the
+    real decoded length, which can be shorter than requested ``duration``
+    near a track's end. Downsampling to ``buckets`` happens here, not in the
+    browser: decoding is cheap (this is plain ffmpeg PCM extraction, not the
+    STFT/HPSS analysis path -- confirmed even a whole 6-minute track decodes
+    in well under a second), but shipping raw samples over HTTP for a
+    multi-minute track would not be. A whole-track call (``duration=None``)
+    is how the GUI learns a track's total duration in the first place.
+    """
+    pcm = extract_pcm(spec, sample_rate=_PEAKS_SAMPLE_RATE, start=start or None, duration=duration)
+    actual_duration = len(pcm) / _PEAKS_SAMPLE_RATE
+    if len(pcm) == 0 or buckets <= 0:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32), actual_duration
+
+    bucket_size = max(1, len(pcm) // buckets)
+    usable = pcm[: bucket_size * buckets] if len(pcm) >= bucket_size * buckets else pcm
+    n = len(usable) // bucket_size
+    if n == 0:
+        return np.array([pcm.min()], dtype=np.float32), np.array([pcm.max()], dtype=np.float32), actual_duration
+    chunks = usable[: n * bucket_size].reshape(n, bucket_size)
+    return chunks.min(axis=1), chunks.max(axis=1), actual_duration
+
+
 def extract_wav_clip(spec: AudioTrackSpec, start: float, duration: float, sample_rate: int = 44100) -> bytes:
     """Encode a short window of a track as playable WAV bytes.
 

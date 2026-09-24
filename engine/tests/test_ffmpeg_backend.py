@@ -8,7 +8,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from syncaudio.ffmpeg_backend import extract_pcm, extract_wav_clip, parse_track_spec, probe_audio_streams, resolve_ffmpeg
+from syncaudio.ffmpeg_backend import (
+    extract_pcm,
+    extract_peaks,
+    extract_wav_clip,
+    parse_track_spec,
+    probe_audio_streams,
+    resolve_ffmpeg,
+)
 from syncaudio.models import AudioTrackSpec
 
 
@@ -99,6 +106,22 @@ def test_extract_pcm_from_plain_wav(wav_file: Path) -> None:
     assert pcm.dtype == np.float32
     assert abs(len(pcm) - 16000) < 100
     assert np.abs(pcm).max() <= 1.0
+
+
+def test_extract_peaks_bucket_count_and_range(wav_file: Path) -> None:
+    spec = parse_track_spec(str(wav_file))
+    mins, maxes, duration = extract_peaks(spec, buckets=50)
+    assert len(mins) == 50
+    assert len(maxes) == 50
+    assert abs(duration - 1.0) < 0.05  # wav_file is a 1s tone
+    assert (mins <= 0).all() and (maxes >= 0).all()  # a sine wave crosses zero in every bucket
+    assert (mins >= -1.0).all() and (maxes <= 1.0).all()
+
+
+def test_extract_peaks_whole_track_when_duration_omitted(wav_file: Path) -> None:
+    spec = parse_track_spec(str(wav_file))
+    _, _, duration = extract_peaks(spec, buckets=10)
+    assert abs(duration - 1.0) < 0.05
 
 
 def test_extract_wav_clip_is_a_playable_wav(wav_file: Path) -> None:
