@@ -30,6 +30,20 @@ export interface AlignResponse {
   results: AlignResult[];
 }
 
+export interface SegmentOut {
+  start_s: number;
+  end_s: number;
+  offset_start: number;
+  offset_end: number;
+  is_drift: boolean;
+}
+
+export interface SegmentsResponse {
+  reference: string;
+  track: string;
+  segments: SegmentOut[];
+}
+
 async function readErrorDetail(resp: Response): Promise<string> {
   try {
     const body = await resp.json();
@@ -73,9 +87,56 @@ export async function startAlignJob(
   return data.job_id as string;
 }
 
-export type JobEvent =
+export interface PrefetchResponse {
+  cached: number;
+}
+
+/**
+ * Warms the engine's analysis cache for every track in the background --
+ * fire right after `probe` succeeds so that by the time the user picks a
+ * reference and clicks a detection button, the ~7s-per-track
+ * extraction+envelope cost (the actual bottleneck, not ffmpeg decoding) is
+ * already paid. Fire-and-forget: a failure here just means the next
+ * detection redoes the work itself, so callers aren't required to await
+ * the job's completion or handle its errors specially.
+ */
+export async function startPrefetchJob(path: string, trackIndices: number[]): Promise<string> {
+  const resp = await fetch(`${BASE_URL}/jobs/prefetch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tracks: trackIndices.map((index) => ({ path, index })) }),
+  });
+  if (!resp.ok) throw new Error(await readErrorDetail(resp));
+  const data = await resp.json();
+  return data.job_id as string;
+}
+
+export async function startSegmentsJob(
+  referencePath: string,
+  referenceIndex: number,
+  trackPath: string,
+  trackIndex: number,
+  options?: { windowS?: number; hopS?: number; marginS?: number },
+): Promise<string> {
+  const resp = await fetch(`${BASE_URL}/jobs/segments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reference: { path: referencePath, index: referenceIndex },
+      track: { path: trackPath, index: trackIndex },
+      ...(options?.windowS !== undefined ? { window_s: options.windowS } : {}),
+      ...(options?.hopS !== undefined ? { hop_s: options.hopS } : {}),
+      ...(options?.marginS !== undefined ? { margin_s: options.marginS } : {}),
+    }),
+  });
+  if (!resp.ok) throw new Error(await readErrorDetail(resp));
+  const data = await resp.json();
+  return data.job_id as string;
+}
+
+export type JobEvent<TResult> =
   | { type: "log"; message: string }
-  | { type: "done"; result: AlignResponse }
+  | { type: "done"; result: TResult }
   | { type: "error"; message: string };
 
 /**
@@ -86,12 +147,12 @@ export type JobEvent =
  * this, the caller's UI would stay stuck in "in progress" forever with no
  * way to know something went wrong.
  */
-export function connectJobWS(jobId: string, onEvent: (event: JobEvent) => void): () => void {
+export function connectJobWS<TResult>(jobId: string, onEvent: (event: JobEvent<TResult>) => void): () => void {
   const ws = new WebSocket(`ws://127.0.0.1:8756/jobs/${jobId}/ws`);
   let settled = false;
 
   ws.onmessage = (ev) => {
-    const event: JobEvent = JSON.parse(ev.data);
+    const event: JobEvent<TResult> = JSON.parse(ev.data);
     if (event.type === "done" || event.type === "error") settled = true;
     onEvent(event);
   };

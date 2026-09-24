@@ -21,13 +21,104 @@
   -webkit-text-size-adjust: 100%;
 }
 
-.container {
+html,
+body,
+#root {
+  height: 100%;
   margin: 0;
-  padding-top: 10vh;
+}
+
+.container {
+  height: 100vh;
+  margin: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   text-align: center;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.app-header {
+  flex: 0 0 auto;
+  padding: 0.6em 1em 0.2em;
+}
+
+.app-header h1 {
+  margin: 0 0 0.15em;
+  font-size: 1.3em;
+}
+
+.file-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8em;
+  padding: 0.2em 1em 0.6em;
+  flex-wrap: wrap;
+}
+
+/* A fixed 2-column grid: tracks on the left (full height), quick-detect and
+   detailed-analysis stacked on the right. Every region always exists (see
+   App.tsx's placeholders) and owns a fixed slice of the window -- nothing
+   here grows the window or the page; overflowing *content* scrolls inside
+   its own panel instead. `min-height: 0` on both the grid container and
+   each panel is load-bearing: grid/flex items default to `min-height:
+   auto`, which lets their content's natural size override the track/panel
+   size and defeats `overflow: auto` entirely -- a classic CSS trap. */
+.app-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 1em 1em;
+  display: grid;
+  grid-template-columns: minmax(320px, 440px) 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0.9em;
+  overflow: hidden;
+}
+
+.field-tracks {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.field-quick {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.field-detail {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.panel {
+  min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 10px;
+  padding: 0.8em 1em;
+  overflow: auto;
+  text-align: left;
+  /* Windows paths have no spaces to break on -- without this, a long one
+     (as in a result line naming the analyzed track) overflows the panel
+     instead of wrapping. Inherited by every descendant, not just <p>. */
+  overflow-wrap: anywhere;
+}
+
+.panel h2 {
+  margin: 0 0 0.5em;
+  font-size: 1em;
+  text-align: center;
+  opacity: 0.85;
+}
+
+.placeholder {
+  opacity: 0.5;
+  font-style: italic;
+  text-align: center;
+  font-size: 0.9em;
 }
 
 .logo {
@@ -100,44 +191,97 @@ button {
   font-style: italic;
 }
 
+.prefetch-status {
+  opacity: 0.6;
+  font-style: italic;
+  font-size: 0.85em;
+}
+
 .file-path {
   font-family: monospace;
+  font-size: 0.85em;
   opacity: 0.8;
   word-break: break-all;
+  max-width: 40em;
+}
+
+.small-button {
+  padding: 0.3em 0.7em;
+  font-size: 0.85em;
+}
+
+.segments-result {
+  margin-top: 0.5em;
+}
+
+.edit-button {
+  margin-left: 0.6em;
+}
+
+.tracks-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5em;
+  margin-top: 0.8em;
+}
+
+.hint {
+  max-width: 32em;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.hint summary {
+  cursor: pointer;
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.hint p {
+  margin: 0.5em 0 0;
+  text-align: left;
 }
 
 .error {
   color: #d33;
 }
 
-.tracks {
-  margin-top: 1.5em;
-}
-
-.tracks table {
-  margin: 0 auto 1em;
+.field-tracks table {
   border-collapse: collapse;
-}
-
-.tracks th,
-.tracks td {
-  padding: 0.4em 0.8em;
-  text-align: center;
-}
-
-.log {
-  margin-top: 1em;
-  padding: 0.8em;
-  text-align: left;
-  max-height: 10em;
-  overflow-y: auto;
-  background: rgba(0, 0, 0, 0.06);
-  border-radius: 8px;
+  width: 100%;
   font-size: 0.85em;
 }
 
+.field-tracks th,
+.field-tracks td {
+  padding: 0.3em 0.4em;
+  text-align: center;
+}
+
+.log-panel {
+  text-align: left;
+  font-size: 0.85em;
+}
+
+.log-panel summary {
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.log {
+  margin-top: 0.5em;
+  padding: 0.8em;
+  max-height: 7em;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+}
+
 .result {
-  margin-top: 1em;
   font-size: 1.1em;
 }
 
