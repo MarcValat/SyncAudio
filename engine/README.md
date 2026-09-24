@@ -148,10 +148,24 @@ N'analyse ici que les 10 minutes commençant à 5 minutes (utile pour sauter un 
 - L'extrait doit contenir un minimum d'activité musique/bruitages (une scène uniquement silencieuse ou dialoguée donnera une confiance faible).
 - Par défaut, seuls les décalages allant jusqu'à ~10 % de la durée de l'extrait sont recherchés (voir « Limites connues » ci-dessus) : avec `--duration 600`, un décalage réel de plus d'environ 60s ne sera pas trouvé. Si le décalage attendu est plus grand, augmentez `--duration` en conséquence.
 
+## Sidecar HTTP (`serve`)
+
+Expose le même moteur (`probe`/`align`/`segments`/`render`) en HTTP, pour un futur client autre que le CLI (le GUI, notamment) :
+
+```
+uv run syncaudio serve
+```
+
+Démarre sur `http://127.0.0.1:8756` par défaut (`--host`/`--port` pour changer). Docs interactives (Swagger) sur `/docs` une fois lancé — pratique pour explorer les endpoints à la main. `POST /render` reprend les mêmes options que la commande `render` (dont `segmented`, `import_audio`, `subs`) en JSON plutôt qu'en flags.
+
+Deux façons d'appeler `align`/`segments`/`render` :
+- **Direct** (`POST /align`, `POST /segments`, `POST /render`) : bloque jusqu'à la fin, simple pour un script ou une vérification rapide.
+- **En job** (`POST /jobs/align`, `POST /jobs/segments`, `POST /jobs/render`) : retourne immédiatement un `job_id`, le traitement tourne en arrière-plan. `WS /jobs/{job_id}/ws` diffuse en direct les mêmes messages de progression que ceux affichés par le CLI (`[analyse] ...`), puis un message final `done` (avec le résultat) ou `error`. `GET /jobs/{job_id}` permet aussi d'interroger l'état à tout moment (utile en complément ou à la place de la WebSocket). C'est le mode à utiliser pour un GUI sur un vrai fichier (dizaines de secondes) : progression en direct plutôt qu'un bouton figé.
+
 ## Développement
 
 ```
 uv run pytest
 ```
 
-`tests/test_align.py` valide l'algorithme sur des signaux synthétiques (sans ffmpeg). `tests/test_ffmpeg_backend.py` valide l'extraction/probe de bout en bout avec le ffmpeg embarqué.
+`tests/test_align.py` valide l'algorithme sur des signaux synthétiques (sans ffmpeg). `tests/test_ffmpeg_backend.py` valide l'extraction/probe de bout en bout avec le ffmpeg embarqué. `tests/test_server.py` valide le sidecar HTTP avec `fastapi.testclient`.
