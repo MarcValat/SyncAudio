@@ -128,6 +128,29 @@ def test_segments_endpoint_returns_a_segment(offset_mkv: tuple[Path, float]) -> 
     assert abs(body["segments"][0]["offset_start"] - offset_s) < 0.5
 
 
+def test_clip_endpoint_returns_a_playable_wav(offset_mkv: tuple[Path, float]) -> None:
+    mkv, _ = offset_mkv
+    resp = client.get("/clip", params={"path": str(mkv), "index": 0, "start": 1.0, "duration": 2.0})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.content[:4] == b"RIFF"
+    assert resp.content[8:12] == b"WAVE"
+
+
+def test_clip_endpoint_caps_duration(offset_mkv: tuple[Path, float]) -> None:
+    mkv, _ = offset_mkv
+    resp = client.get("/clip", params={"path": str(mkv), "index": 0, "start": 0.0, "duration": 9999})
+    assert resp.status_code == 200
+    # Generous upper bound for a capped ~30s clip -- mainly guards against
+    # silently honoring an absurd duration request.
+    assert len(resp.content) < 10_000_000
+
+
+def test_clip_endpoint_missing_file_returns_400() -> None:
+    resp = client.get("/clip", params={"path": "does-not-exist.mkv", "index": 0})
+    assert resp.status_code == 400
+
+
 def test_render_endpoint_writes_a_corrected_file(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
     output_path = str(mkv.with_name("out.synced.mkv"))
@@ -175,7 +198,7 @@ def test_render_endpoint_segmented_uses_supplied_segment_override(offset_mkv: tu
     """A caller that already ran /segments and let the user edit the result
     (SegmentEditor.tsx) must get exactly those segments rendered, not a
     fresh, silently-recomputed detect_segments() that discards the edits."""
-    mkv, offset_s = offset_mkv
+    mkv, _offset_s = offset_mkv
     output_path = str(mkv.with_name("out.override.mkv"))
     # Deliberately wrong/made-up offset, distinguishable from the real ~3s:
     # if this shows up in the render instead of the real offset, the

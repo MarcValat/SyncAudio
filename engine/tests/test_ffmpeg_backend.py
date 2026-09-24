@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, resolve_ffmpeg
+from syncaudio.ffmpeg_backend import extract_pcm, extract_wav_clip, parse_track_spec, probe_audio_streams, resolve_ffmpeg
 from syncaudio.models import AudioTrackSpec
 
 
@@ -99,6 +99,14 @@ def test_extract_pcm_from_plain_wav(wav_file: Path) -> None:
     assert pcm.dtype == np.float32
     assert abs(len(pcm) - 16000) < 100
     assert np.abs(pcm).max() <= 1.0
+
+
+def test_extract_wav_clip_is_a_playable_wav(wav_file: Path) -> None:
+    spec = parse_track_spec(str(wav_file))
+    clip = extract_wav_clip(spec, start=0.1, duration=0.3, sample_rate=44100)
+    assert clip[:4] == b"RIFF"
+    assert clip[8:12] == b"WAVE"
+    assert len(clip) > 0.3 * 44100 * 2 * 0.5  # roughly duration * rate * bytes/sample, some slack
 
 
 def test_probe_and_extract_multi_track_mkv(multi_track_mkv: Path) -> None:

@@ -26,10 +26,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
-from syncaudio.ffmpeg_backend import FFmpegError, probe_audio_streams
+from syncaudio.ffmpeg_backend import FFmpegError, extract_wav_clip, probe_audio_streams
 from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
@@ -151,6 +152,26 @@ def probe(path: str) -> ProbeResponse:
             for s in streams
         ],
     )
+
+
+_MAX_CLIP_DURATION_S = 30.0
+
+
+@app.get("/clip")
+def clip(path: str, index: int, start: float = 0.0, duration: float = 12.0) -> Response:
+    """A short playable WAV clip of one track, for the GUI's listen-before-render preview.
+
+    Synchronous (not a job): unlike a full-track analysis, extracting a
+    short window is fast enough (ffmpeg seeks straight to ``start`` instead
+    of decoding everything before it) that a progress stream would be
+    pointless overhead here.
+    """
+    spec = AudioTrackSpec(raw=f"{path}@{index}", path=path, stream_index=index)
+    try:
+        wav_bytes = extract_wav_clip(spec, start=max(0.0, start), duration=min(duration, _MAX_CLIP_DURATION_S))
+    except FFmpegError as exc:
+        raise _http_error(exc) from exc
+    return Response(content=wav_bytes, media_type="audio/wav")
 
 
 class PrefetchRequest(BaseModel):

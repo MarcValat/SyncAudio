@@ -181,3 +181,31 @@ def extract_pcm(
         )
     pcm = np.frombuffer(proc.stdout, dtype="<i2")
     return pcm.astype(np.float32) / 32768.0
+
+
+def extract_wav_clip(spec: AudioTrackSpec, start: float, duration: float, sample_rate: int = 44100) -> bytes:
+    """Encode a short window of a track as playable WAV bytes.
+
+    Unlike ``extract_pcm`` (mono, 16kHz, raw samples only ever consumed by
+    numpy for analysis), this keeps the track's original channel layout at a
+    normal playback rate and wraps it in a proper WAV header -- for the
+    GUI's listen-before-render preview, not analysis. Only ever called with
+    a short ``duration`` (a preview clip, not a whole track), so this stays
+    fast even without the analysis cache.
+    """
+    ffmpeg = resolve_ffmpeg()
+    stream_index = spec.stream_index if spec.stream_index is not None else 0
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        "-ss", str(start), "-i", spec.path, "-t", str(duration),
+        "-map", f"0:a:{stream_index}",
+        "-ar", str(sample_rate),
+        "-f", "wav", "-acodec", "pcm_s16le", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        raise FFmpegError(
+            f"Échec de l'extraction du clip pour {spec.raw!r} :\n"
+            f"{proc.stderr.decode(errors='replace')}"
+        )
+    return proc.stdout
