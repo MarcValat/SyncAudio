@@ -316,6 +316,19 @@ def _track_key(spec: AudioTrackSpec) -> tuple[str, int]:
     return (str(Path(spec.path).resolve()), idx)
 
 
+class SegmentOverride(BaseModel):
+    """Segments to use for a candidate as-is, skipping ``detect_segments`` for it.
+
+    Lets a caller that already ran ``/jobs/segments`` and let the user
+    manually edit the result (drag boundaries, merge segments, ...) render
+    exactly what was reviewed, instead of the server silently redoing its
+    own detection and discarding the edits.
+    """
+
+    track: TrackRef
+    segments: list[SegmentOut]
+
+
 class RenderRequest(BaseModel):
     input_path: str
     reference_index: int
@@ -326,6 +339,7 @@ class RenderRequest(BaseModel):
     output_path: str | None = None
     audio_only: bool = False
     segmented: bool = False
+    segment_overrides: list[SegmentOverride] = []
     window_s: float = DEFAULT_WINDOW_S
     hop_s: float = DEFAULT_HOP_S
     margin_s: float = DEFAULT_MARGIN_S
@@ -409,13 +423,25 @@ def _do_render(req: RenderRequest, log: Callable[[str], None] = _NO_LOG) -> Rend
 
     try:
         if req.segmented:
-            seg_corrections: list[SegmentedTrackCorrection] = [
-                plan_segmented_correction(
-                    reference_spec, spec, start=req.start, duration=req.duration,
-                    window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s, log=log,
-                )
-                for spec in candidates
-            ]
+            overrides = {_track_key(o.track.to_spec()): o.segments for o in req.segment_overrides}
+            seg_corrections: list[SegmentedTrackCorrection] = []
+            for spec in candidates:
+                override = overrides.get(_track_key(spec))
+                if override is not None:
+                    idx = spec.stream_index if spec.stream_index is not None else 0
+                    streams = {s.index: s for s in probe_audio_streams(spec.path)}
+                    language = streams[idx].language if idx in streams else None
+                    log(f"[segments] {spec.raw} : utilisation des segments fournis (édités manuellement)")
+                    seg_corrections.append(
+                        SegmentedTrackCorrection(track=spec, language=language, segments=[s.to_segment() for s in override])
+                    )
+                else:
+                    seg_corrections.append(
+                        plan_segmented_correction(
+                            reference_spec, spec, start=req.start, duration=req.duration,
+                            window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s, log=log,
+                        )
+                    )
             segmented_imported_subs = [
                 (pair.subs.to_spec(), seg_corrections[pos].segments) for pair, pos in zip(req.subs, subs_positions)
             ]

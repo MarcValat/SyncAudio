@@ -171,6 +171,49 @@ def test_render_endpoint_segmented(offset_mkv: tuple[Path, float]) -> None:
     assert body["corrections"][0]["offset_seconds"] is None
 
 
+def test_render_endpoint_segmented_uses_supplied_segment_override(offset_mkv: tuple[Path, float]) -> None:
+    """A caller that already ran /segments and let the user edit the result
+    (SegmentEditor.tsx) must get exactly those segments rendered, not a
+    fresh, silently-recomputed detect_segments() that discards the edits."""
+    mkv, offset_s = offset_mkv
+    output_path = str(mkv.with_name("out.override.mkv"))
+    # Deliberately wrong/made-up offset, distinguishable from the real ~3s:
+    # if this shows up in the render instead of the real offset, the
+    # override was honored rather than ignored in favor of auto-detection.
+    fake_offset = 1.0
+    resp = client.post(
+        "/render",
+        json={
+            "input_path": str(mkv),
+            "reference_index": 0,
+            "track_indices": [1],
+            "output_path": output_path,
+            "segmented": True,
+            "segment_overrides": [
+                {
+                    "track": {"path": str(mkv), "index": 1},
+                    "segments": [
+                        {
+                            "start_s": 0.0,
+                            "end_s": 30.0,
+                            "offset_start": fake_offset,
+                            "offset_end": fake_offset,
+                            "is_drift": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["written"] == [output_path]
+    segs = body["corrections"][0]["segments"]
+    assert segs == [
+        {"start_s": 0.0, "end_s": 30.0, "offset_start": fake_offset, "offset_end": fake_offset, "is_drift": False}
+    ]
+
+
 def test_render_endpoint_unknown_track_returns_400(offset_mkv: tuple[Path, float]) -> None:
     mkv, _ = offset_mkv
     resp = client.post(
