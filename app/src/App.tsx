@@ -3,15 +3,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   checkHealth,
   probe,
-  startAlignJob,
   startSegmentsJob,
   startPrefetchJob,
+  startSegmentedRenderJob,
   connectJobWS,
   type TrackInfo,
-  type AlignResponse,
   type SegmentsResponse,
-  type SegmentOut,
   type PrefetchResponse,
+  type RenderResponse,
 } from "./api";
 import { SegmentChart } from "./SegmentChart";
 import { LogPanel } from "./LogPanel";
@@ -22,6 +21,27 @@ type EngineStatus = "starting" | "ready" | "unreachable";
 
 const HEALTH_POLL_ATTEMPTS = 40; // 40 * 500ms = 20s before giving up
 
+/**
+ * Per-track analysis + export state, keyed by track index. There used to be
+ * a separate "quick" flat-offset flow (align) alongside this one, but once
+ * the analysis cache made both equally fast, the flat flow was strictly
+ * weaker (no drift/jump detection, and its "confidence" value was already
+ * known to be unreliable) except for launching several tracks at once --
+ * so that's folded in here instead: checking several boxes below fires one
+ * of these per track.
+ */
+interface TrackAnalysis {
+  status: "running" | "done" | "error";
+  referenceIndex: number;
+  log: string[];
+  result: SegmentsResponse | null;
+  error: string | null;
+  rendering: boolean;
+  renderLog: string[];
+  renderResult: RenderResponse | null;
+  renderError: string | null;
+}
+
 function App() {
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("starting");
   const [filePath, setFilePath] = useState<string | null>(null);
@@ -29,17 +49,10 @@ function App() {
   const [referenceIndex, setReferenceIndex] = useState<number | null>(null);
   const [targetIndices, setTargetIndices] = useState<number[]>([]);
   const [probeError, setProbeError] = useState<string | null>(null);
-  const [logLines, setLogLines] = useState<string[]>([]);
-  const [result, setResult] = useState<AlignResponse | null>(null);
-  const [detecting, setDetecting] = useState(false);
-  const [detectError, setDetectError] = useState<string | null>(null);
-
-  const [analyzingTrack, setAnalyzingTrack] = useState<number | null>(null);
-  const [segmentsResult, setSegmentsResult] = useState<SegmentsResponse | null>(null);
-  const [segmentsLog, setSegmentsLog] = useState<string[]>([]);
-  const [segmentsError, setSegmentsError] = useState<string | null>(null);
-  const [editingSegments, setEditingSegments] = useState(false);
   const [prefetching, setPrefetching] = useState(false);
+
+  const [analyses, setAnalyses] = useState<Record<number, TrackAnalysis>>({});
+  const [editingTrack, setEditingTrack] = useState<number | null>(null);
 
   const pollHealth = useCallback(() => {
     let cancelled = false;
@@ -76,15 +89,9 @@ function App() {
     setTracks(null);
     setReferenceIndex(null);
     setTargetIndices([]);
-    setResult(null);
-    setLogLines([]);
-    setDetectError(null);
     setProbeError(null);
-    setAnalyzingTrack(null);
-    setSegmentsResult(null);
-    setSegmentsLog([]);
-    setSegmentsError(null);
-    setEditingSegments(false);
+    setAnalyses({});
+    setEditingTrack(null);
 
     try {
       const res = await probe(selected);
@@ -99,8 +106,8 @@ function App() {
     }
   }
 
-  /** Fire-and-forget: warms the engine's cache so the first "Détecter"/"Analyser"
-   * click doesn't pay the ~7s-per-track extraction cost that's otherwise
+  /** Fire-and-forget: warms the engine's cache so the first "Analyser" click
+   * doesn't pay the ~7s-per-track extraction cost that's otherwise
    * unavoidable on a cold cache (see api.ts's startPrefetchJob). */
   function prefetchTracks(path: string, trackIndices: number[]) {
     setPrefetching(true);
@@ -125,56 +132,77 @@ function App() {
     );
   }
 
-  async function handleDetect() {
-    if (!filePath || referenceIndex === null || targetIndices.length === 0) return;
-    setDetecting(true);
-    setDetectError(null);
-    setResult(null);
-    setLogLines([]);
+  function updateAnalysis(trackIndex: number, patch: Partial<TrackAnalysis> | ((entry: TrackAnalysis) => Partial<TrackAnalysis>)) {
+    setAnalyses((current) => {
+      const entry = current[trackIndex];
+      if (!entry) return current;
+      const nextPatch = typeof patch === "function" ? patch(entry) : patch;
+      return { ...current, [trackIndex]: { ...entry, ...nextPatch } };
+    });
+  }
+
+  async function analyzeTrack(trackIndex: number, refIndex: number) {
+    if (!filePath) return;
+    setAnalyses((current) => ({
+      ...current,
+      [trackIndex]: {
+        status: "running",
+        referenceIndex: refIndex,
+        log: [],
+        result: null,
+        error: null,
+        rendering: false,
+        renderLog: [],
+        renderResult: null,
+        renderError: null,
+      },
+    }));
     try {
-      const jobId = await startAlignJob(filePath, referenceIndex, filePath, targetIndices);
-      connectJobWS<AlignResponse>(jobId, (event) => {
+      const jobId = await startSegmentsJob(filePath, refIndex, filePath, trackIndex);
+      connectJobWS<SegmentsResponse>(jobId, (event) => {
         if (event.type === "log") {
-          setLogLines((lines) => [...lines, event.message]);
+          updateAnalysis(trackIndex, (e) => ({ log: [...e.log, event.message] }));
         } else if (event.type === "done") {
-          setResult(event.result);
-          setDetecting(false);
+          updateAnalysis(trackIndex, { status: "done", result: event.result });
         } else if (event.type === "error") {
-          setDetectError(event.message);
-          setDetecting(false);
+          updateAnalysis(trackIndex, { status: "error", error: event.message });
         }
       });
     } catch (err) {
-      setDetectError(err instanceof Error ? err.message : String(err));
-      setDetecting(false);
+      updateAnalysis(trackIndex, { status: "error", error: err instanceof Error ? err.message : String(err) });
     }
   }
 
-  async function handleAnalyzeSegments(trackIndex: number) {
-    if (!filePath || referenceIndex === null) return;
-    setAnalyzingTrack(trackIndex);
-    setSegmentsError(null);
-    setSegmentsResult(null);
-    setSegmentsLog([]);
-    setEditingSegments(false);
+  function handleAnalyzeSelected() {
+    if (referenceIndex === null) return;
+    for (const idx of targetIndices) {
+      analyzeTrack(idx, referenceIndex);
+    }
+  }
+
+  async function renderTrack(trackIndex: number) {
+    const entry = analyses[trackIndex];
+    if (!filePath || !entry || !entry.result) return;
+    updateAnalysis(trackIndex, { rendering: true, renderLog: [], renderResult: null, renderError: null });
     try {
-      const jobId = await startSegmentsJob(filePath, referenceIndex, filePath, trackIndex);
-      connectJobWS<SegmentsResponse>(jobId, (event) => {
+      const jobId = await startSegmentedRenderJob(filePath, entry.referenceIndex, trackIndex, entry.result.segments);
+      connectJobWS<RenderResponse>(jobId, (event) => {
         if (event.type === "log") {
-          setSegmentsLog((lines) => [...lines, event.message]);
+          updateAnalysis(trackIndex, (e) => ({ renderLog: [...e.renderLog, event.message] }));
         } else if (event.type === "done") {
-          setSegmentsResult(event.result);
-          setAnalyzingTrack(null);
+          updateAnalysis(trackIndex, { rendering: false, renderResult: event.result });
         } else if (event.type === "error") {
-          setSegmentsError(event.message);
-          setAnalyzingTrack(null);
+          updateAnalysis(trackIndex, { rendering: false, renderError: event.message });
         }
       });
     } catch (err) {
-      setSegmentsError(err instanceof Error ? err.message : String(err));
-      setAnalyzingTrack(null);
+      updateAnalysis(trackIndex, { rendering: false, renderError: err instanceof Error ? err.message : String(err) });
     }
   }
+
+  const anySelectedRunning = targetIndices.some((i) => analyses[i]?.status === "running");
+  const analyzedTracks = (tracks ?? []).filter((t) => analyses[t.index]);
+  const editingEntry = editingTrack !== null ? analyses[editingTrack] : null;
 
   return (
     <div className="container">
@@ -225,8 +253,7 @@ function App() {
                     <th>Langue</th>
                     <th>Codec</th>
                     <th>Réf.</th>
-                    <th>Corriger</th>
-                    <th>Détail</th>
+                    <th>Analyser</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -251,16 +278,6 @@ function App() {
                           onChange={() => toggleTarget(t.index)}
                         />
                       </td>
-                      <td>
-                        <button
-                          className="small-button"
-                          title="Analyse détaillée de cette piste seule : détecte aussi une dérive progressive ou des sauts nets (pas juste un décalage constant), et affiche la courbe ci-dessous."
-                          disabled={referenceIndex === t.index || analyzingTrack !== null}
-                          onClick={() => handleAnalyzeSegments(t.index)}
-                        >
-                          {analyzingTrack === t.index ? "Analyse..." : "Analyser"}
-                        </button>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -268,74 +285,69 @@ function App() {
 
               <div className="tracks-actions">
                 <button
-                  onClick={handleDetect}
-                  disabled={detecting || referenceIndex === null || targetIndices.length === 0}
-                  title="Décalage global unique (suppose qu'il est constant sur toute la piste) ; peut traiter plusieurs pistes cochées à la fois."
+                  onClick={handleAnalyzeSelected}
+                  disabled={referenceIndex === null || targetIndices.length === 0 || anySelectedRunning}
+                  title="Détecte le décalage de chaque piste cochée par rapport à la référence (dérive et sauts nets inclus), avec la courbe correspondante."
                 >
-                  {detecting ? "Détection en cours..." : "Détecter le décalage"}
+                  {anySelectedRunning ? "Analyse en cours..." : "Analyser"}
                 </button>
-
-                <details className="hint">
-                  <summary>Quelle différence avec « Analyser » ?</summary>
-                  <p>
-                    « Détecter le décalage » donne un seul décalage global (en supposant qu'il est constant) et peut
-                    traiter plusieurs pistes à la fois. « Analyser » (par piste) détecte aussi une dérive
-                    progressive ou des sauts, avec la courbe correspondante — pas plus lent en pratique (l'essentiel
-                    du temps est pris par l'extraction/l'analyse audio, identique dans les deux cas), juste plus
-                    détaillé et limité à une piste.
-                  </p>
-                </details>
               </div>
             </>
           )}
         </section>
 
-        <section className="panel field-quick">
-          <h2>Détection rapide</h2>
-          {logLines.length === 0 && !detectError && !result && (
-            <p className="placeholder">Résultat de « Détecter le décalage » ici.</p>
+        <section className="panel field-analysis">
+          <h2>Analyse</h2>
+          {analyzedTracks.length === 0 && (
+            <p className="placeholder">Coche une ou plusieurs pistes à corriger, puis clique sur « Analyser ».</p>
           )}
-          <LogPanel lines={logLines} />
-          {detectError && <p className="error">{detectError}</p>}
-          {result && (
-            <div className="result">
-              {result.results.map((r) => (
-                <p key={r.track}>
-                  {r.track} : décalage <strong>{r.offset_seconds.toFixed(3)}s</strong>
-                  {r.ambiguous ? " (ambigu)" : ""}
-                </p>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="panel field-detail">
-          <h2>Analyse détaillée</h2>
-          {segmentsLog.length === 0 && !segmentsError && !segmentsResult && (
-            <p className="placeholder">Résultat de « Analyser » (par piste) ici, avec la courbe de décalage.</p>
-          )}
-          <LogPanel lines={segmentsLog} />
-          {segmentsError && <p className="error">{segmentsError}</p>}
-          {segmentsResult && (
-            <div className="segments-result">
-              <p>
-                {segmentsResult.track} vs {segmentsResult.reference} — {segmentsResult.segments.length} segment
-                {segmentsResult.segments.length > 1 ? "s" : ""}
-                <button className="small-button edit-button" onClick={() => setEditingSegments(true)}>
-                  Modifier
-                </button>
-              </p>
-              <SegmentChart segments={segmentsResult.segments} />
-            </div>
-          )}
+          {analyzedTracks.map((t) => {
+            const entry = analyses[t.index];
+            return (
+              <div className="analysis-card" key={t.index}>
+                <h3>
+                  Piste @{t.index} ({t.language ?? "?"})
+                </h3>
+                <LogPanel lines={entry.log} />
+                {entry.error && <p className="error">{entry.error}</p>}
+                {entry.status === "running" && !entry.result && <p className="placeholder">Analyse en cours...</p>}
+                {entry.result && (
+                  <div className="segments-result">
+                    <p>
+                      {entry.result.segments.length} segment
+                      {entry.result.segments.length > 1 ? "s" : ""}
+                      <button className="small-button edit-button" onClick={() => setEditingTrack(t.index)}>
+                        Modifier
+                      </button>
+                      <button
+                        className="small-button edit-button"
+                        onClick={() => renderTrack(t.index)}
+                        disabled={entry.rendering}
+                      >
+                        {entry.rendering ? "Export en cours..." : "Exporter cette piste"}
+                      </button>
+                    </p>
+                    <SegmentChart segments={entry.result.segments} />
+                    <LogPanel lines={entry.renderLog} />
+                    {entry.renderError && <p className="error">{entry.renderError}</p>}
+                    {entry.renderResult && (
+                      <p className="render-success">Fichier écrit : {entry.renderResult.written.join(", ")}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </section>
       </main>
 
-      {editingSegments && segmentsResult && (
+      {editingTrack !== null && editingEntry?.result && (
         <SegmentEditor
-          segments={segmentsResult.segments}
-          onClose={() => setEditingSegments(false)}
-          onSave={(edited: SegmentOut[]) => setSegmentsResult((r) => (r ? { ...r, segments: edited } : r))}
+          segments={editingEntry.result.segments}
+          onClose={() => setEditingTrack(null)}
+          onSave={(edited) =>
+            updateAnalysis(editingTrack, (e) => ({ result: e.result ? { ...e.result, segments: edited } : e.result }))
+          }
         />
       )}
     </div>

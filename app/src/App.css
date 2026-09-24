@@ -58,38 +58,31 @@ body,
   flex-wrap: wrap;
 }
 
-/* A fixed 2-column grid: tracks on the left (full height), quick-detect and
-   detailed-analysis stacked on the right. Every region always exists (see
-   App.tsx's placeholders) and owns a fixed slice of the window -- nothing
-   here grows the window or the page; overflowing *content* scrolls inside
-   its own panel instead. `min-height: 0` on both the grid container and
-   each panel is load-bearing: grid/flex items default to `min-height:
-   auto`, which lets their content's natural size override the track/panel
-   size and defeats `overflow: auto` entirely -- a classic CSS trap. */
+/* A fixed 2-column grid: tracks on the left, analysis results (one card per
+   analyzed track) on the right, both full height. Every region always
+   exists (see App.tsx's placeholders) and owns a fixed slice of the window
+   -- nothing here grows the window or the page; overflowing *content*
+   scrolls inside its own panel instead. `min-height: 0` on both the grid
+   container and each panel is load-bearing: grid/flex items default to
+   `min-height: auto`, which lets their content's natural size override the
+   track/panel size and defeats `overflow: auto` entirely -- a classic CSS
+   trap. */
 .app-main {
   flex: 1 1 auto;
   min-height: 0;
   padding: 0 1em 1em;
   display: grid;
   grid-template-columns: minmax(320px, 440px) 1fr;
-  grid-template-rows: 1fr 1fr;
   gap: 0.9em;
   overflow: hidden;
 }
 
 .field-tracks {
   grid-column: 1;
-  grid-row: 1 / 3;
 }
 
-.field-quick {
+.field-analysis {
   grid-column: 2;
-  grid-row: 1;
-}
-
-.field-detail {
-  grid-column: 2;
-  grid-row: 2;
 }
 
 .panel {
@@ -226,25 +219,33 @@ button {
   margin-top: 0.8em;
 }
 
-.hint {
-  max-width: 32em;
-  font-size: 0.85em;
-  opacity: 0.75;
+.analysis-card {
+  margin-bottom: 1.2em;
+  padding-bottom: 1em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
 }
 
-.hint summary {
-  cursor: pointer;
-  width: fit-content;
-  margin: 0 auto;
+.analysis-card:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
-.hint p {
-  margin: 0.5em 0 0;
-  text-align: left;
+.analysis-card h3 {
+  margin: 0 0 0.4em;
+  font-size: 0.95em;
+  opacity: 0.85;
 }
 
 .error {
   color: #d33;
+}
+
+.render-success {
+  margin-top: 0.5em;
+  font-size: 0.85em;
+  color: #2a8c4a;
+  word-break: break-all;
 }
 
 .field-tracks table {
@@ -279,10 +280,6 @@ button {
   overflow-wrap: anywhere;
   background: rgba(0, 0, 0, 0.06);
   border-radius: 8px;
-}
-
-.result {
-  font-size: 1.1em;
 }
 
 @media (prefers-color-scheme: dark) {

@@ -17,19 +17,6 @@ export interface ProbeResponse {
   tracks: TrackInfo[];
 }
 
-export interface AlignResult {
-  track: string;
-  language: string | null;
-  offset_seconds: number;
-  confidence: number;
-  ambiguous: boolean;
-}
-
-export interface AlignResponse {
-  reference: string;
-  results: AlignResult[];
-}
-
 export interface SegmentOut {
   start_s: number;
   end_s: number;
@@ -42,6 +29,18 @@ export interface SegmentsResponse {
   reference: string;
   track: string;
   segments: SegmentOut[];
+}
+
+export interface RenderedTrack {
+  track: string;
+  language: string | null;
+  offset_seconds: number | null; // null for a segmented (non-constant) correction
+  segments: SegmentOut[] | null;
+}
+
+export interface RenderResponse {
+  written: string[];
+  corrections: RenderedTrack[];
 }
 
 async function readErrorDetail(resp: Response): Promise<string> {
@@ -66,25 +65,6 @@ export async function probe(path: string): Promise<ProbeResponse> {
   const resp = await fetch(`${BASE_URL}/probe?path=${encodeURIComponent(path)}`);
   if (!resp.ok) throw new Error(await readErrorDetail(resp));
   return resp.json();
-}
-
-export async function startAlignJob(
-  referencePath: string,
-  referenceIndex: number,
-  candidatePath: string,
-  candidateIndices: number[],
-): Promise<string> {
-  const resp = await fetch(`${BASE_URL}/jobs/align`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      reference: { path: referencePath, index: referenceIndex },
-      candidates: candidateIndices.map((index) => ({ path: candidatePath, index })),
-    }),
-  });
-  if (!resp.ok) throw new Error(await readErrorDetail(resp));
-  const data = await resp.json();
-  return data.job_id as string;
 }
 
 export interface PrefetchResponse {
@@ -127,6 +107,34 @@ export async function startSegmentsJob(
       ...(options?.windowS !== undefined ? { window_s: options.windowS } : {}),
       ...(options?.hopS !== undefined ? { hop_s: options.hopS } : {}),
       ...(options?.marginS !== undefined ? { margin_s: options.marginS } : {}),
+    }),
+  });
+  if (!resp.ok) throw new Error(await readErrorDetail(resp));
+  const data = await resp.json();
+  return data.job_id as string;
+}
+
+/**
+ * Segmented (drift/jump-aware) render of exactly one track, using `segments`
+ * as-is instead of letting the server re-run detection -- so a render after
+ * "Analyser" + manual edits in SegmentEditor produces what was actually
+ * reviewed, not a silently recomputed result that discards the edits.
+ */
+export async function startSegmentedRenderJob(
+  inputPath: string,
+  referenceIndex: number,
+  trackIndex: number,
+  segments: SegmentOut[],
+): Promise<string> {
+  const resp = await fetch(`${BASE_URL}/jobs/render`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input_path: inputPath,
+      reference_index: referenceIndex,
+      track_indices: [trackIndex],
+      segmented: true,
+      segment_overrides: [{ track: { path: inputPath, index: trackIndex }, segments }],
     }),
   });
   if (!resp.ok) throw new Error(await readErrorDetail(resp));
