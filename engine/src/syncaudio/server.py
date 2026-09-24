@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from syncaudio.ffmpeg_backend import FFmpegError, probe_audio_streams
@@ -41,7 +42,18 @@ from syncaudio.segments import DEFAULT_HOP_S, DEFAULT_MARGIN_S, DEFAULT_WINDOW_S
 
 app = FastAPI(title="SyncAudio", version="0.1.0")
 
+# The sidecar only ever binds to 127.0.0.1 (see `syncaudio serve`), so it's
+# never reachable from outside the machine -- wide-open CORS here just lets
+# the Tauri webview (a different origin: tauri://... or localhost:1420 in
+# dev) call it, same as any other local desktop-app sidecar.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
 _NO_LOG: Callable[[str], None] = lambda _msg: None  # noqa: E731
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 class TrackRef(BaseModel):
