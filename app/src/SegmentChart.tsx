@@ -2,8 +2,8 @@ import type { SegmentOut } from "./api";
 import "./SegmentChart.css";
 
 const WIDTH = 760;
-const HEIGHT = 220;
-const MARGIN = { top: 16, right: 16, bottom: 28, left: 56 };
+const HEIGHT = 140;
+const MARGIN = { top: 14, right: 16, bottom: 26, left: 56 };
 const PLOT_W = WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_H = HEIGHT - MARGIN.top - MARGIN.bottom;
 

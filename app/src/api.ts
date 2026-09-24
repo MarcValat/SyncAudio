@@ -103,6 +103,32 @@ export async function fetchClip(path: string, index: number, start: number, dura
   return resp.blob();
 }
 
+export interface WaveformResponse {
+  duration: number;
+  peaks_min: number[];
+  peaks_max: number[];
+}
+
+/**
+ * A downsampled (min, max) amplitude envelope for a track window -- never
+ * ships raw audio, so it stays cheap even for a whole multi-minute track at
+ * once (`duration` omitted), unlike `fetchClip`. Used to draw the
+ * always-visible, zoomable comparison waveforms (see TrackPreview.tsx).
+ */
+export async function fetchWaveform(
+  path: string,
+  index: number,
+  start: number,
+  duration: number | null,
+  buckets: number,
+): Promise<WaveformResponse> {
+  const params = new URLSearchParams({ path, index: String(index), start: String(start), buckets: String(buckets) });
+  if (duration !== null) params.set("duration", String(duration));
+  const resp = await fetch(`${BASE_URL}/waveform?${params.toString()}`);
+  if (!resp.ok) throw new Error(await readErrorDetail(resp));
+  return resp.json();
+}
+
 export async function startSegmentsJob(
   referencePath: string,
   referenceIndex: number,

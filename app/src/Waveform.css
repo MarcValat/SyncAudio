@@ -1,29 +1,29 @@
 .waveforms {
-  margin-top: 0.6em;
+  margin-top: 0.4em;
   display: flex;
   flex-direction: column;
-  gap: 0.5em;
+  gap: 0.3em;
 }
 
 .waveform {
   border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
   border-radius: var(--radius-sm, 8px);
-  padding: 0.4em 0.6em;
+  padding: 0.25em 0.5em;
   box-sizing: border-box;
 }
 
 .waveform-label {
-  font-size: 0.75em;
+  font-size: 0.7em;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
-  margin-bottom: 0.2em;
+  margin-bottom: 0.1em;
 }
 
 .waveform-svg {
   width: 100%;
-  height: 70px;
+  height: 52px;
   display: block;
   cursor: pointer;
 }
@@ -47,13 +47,65 @@
   fill: #d38a39;
 }
 
-.waveform-empty {
-  font-size: 11px;
-  fill: currentColor;
-  opacity: 0.5;
+.waveform-final .waveform-path {
+  fill: var(--success, #2a8c4a);
+}
+
+.waveform-highlight {
+  opacity: 0.25;
+}
+
+.waveform-highlight.removed {
+  fill: var(--danger, #d33);
+}
+
+.waveform-highlight.added {
+  fill: var(--success, #2a8c4a);
 }
 
 .waveform-cursor {
   stroke: var(--danger, #d33);
   stroke-width: 2;
+}
+
+.waveform-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65em;
+  color: var(--text-muted);
+  margin-top: 0.1em;
+}
+
+.waveform-legend {
+  display: flex;
+  gap: 1.2em;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin: 0.15em 0;
+}
+
+.waveform-legend-swatch {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  border-radius: 3px;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
+  opacity: 0.5;
+}
+
+.waveform-legend-swatch.removed {
+  background: var(--danger, #d33);
+}
+
+.waveform-legend-swatch.added {
+  background: var(--success, #2a8c4a);
+}
+
+.waveform-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.85em;
+  margin-bottom: 0.25em;
 }
