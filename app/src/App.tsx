@@ -241,24 +241,22 @@ function App() {
     <div className="container">
       <main className="app-main">
         <div className="left-column">
-          <div className="file-bar">
-            <button className="primary-button" onClick={handleOpenFile}>
-              Ouvrir un fichier
-            </button>
-            {filePath && (
-              <span className="file-path" title={filePath}>
-                {basename(filePath)}
-              </span>
-            )}
-            {prefetching && (
-              <span className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer le premier clic sur Analyser.">
-                Analyse audio en cours...
-              </span>
-            )}
-          </div>
+          <button className="primary-button file-open-button" onClick={handleOpenFile}>
+            Ouvrir un fichier
+          </button>
 
           <section className="panel field-tracks">
             <h2>Pistes</h2>
+            {filePath && (
+              <p className="file-path" title={filePath}>
+                {basename(filePath)}
+              </p>
+            )}
+            {prefetching && (
+              <p className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer le premier clic sur Analyser.">
+                Analyse audio en cours...
+              </p>
+            )}
             {!tracks && !probeError && <p className="placeholder">Ouvre un fichier pour voir ses pistes.</p>}
             {probeError && <p className="error">{probeError}</p>}
             {tracks && tracks.length < 2 && (

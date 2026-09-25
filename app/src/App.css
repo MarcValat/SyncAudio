@@ -86,13 +86,9 @@ body {
   color: var(--danger);
 }
 
-.file-bar {
+.file-open-button {
   flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0.8em;
-  flex-wrap: wrap;
+  width: 100%;
 }
 
 /* A fixed 2-column grid: tracks on the left, analysis results (one card per
@@ -120,6 +116,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.8em;
+}
+
+.left-column .field-tracks {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 /* Flex column so the single visible tab's content (see analysis-tabs/
@@ -234,13 +236,15 @@ button:focus-visible {
   color: var(--text-muted);
   font-style: italic;
   font-size: 0.85em;
+  margin: 0 0 0.6em;
 }
 
 .file-path {
   font-family: monospace;
   font-size: 0.85em;
   color: var(--text-muted);
-  max-width: 30em;
+  max-width: 100%;
+  margin: 0 0 0.6em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
