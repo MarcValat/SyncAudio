@@ -239,88 +239,86 @@ function App() {
 
   return (
     <div className="container">
-      <header className="app-header">
-        <h1>SyncAudio</h1>
-      </header>
-
-      <div className="file-bar">
-        <button className="primary-button" onClick={handleOpenFile}>
-          Ouvrir un fichier
-        </button>
-        {filePath && (
-          <span className="file-path" title={filePath}>
-            {basename(filePath)}
-          </span>
-        )}
-        {prefetching && (
-          <span className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer le premier clic sur Analyser.">
-            Analyse audio en cours...
-          </span>
-        )}
-      </div>
-
       <main className="app-main">
-        <section className="panel field-tracks">
-          <h2>Pistes</h2>
-          {!tracks && !probeError && <p className="placeholder">Ouvre un fichier pour voir ses pistes.</p>}
-          {probeError && <p className="error">{probeError}</p>}
-          {tracks && tracks.length < 2 && (
-            <p className="error">Ce fichier n'a qu'une seule piste audio : rien à comparer.</p>
-          )}
-          {tracks && tracks.length >= 2 && (
-            <>
-              <div className="tracks-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Piste</th>
-                      <th>Langue</th>
-                      <th>Codec</th>
-                      <th>Réf.</th>
-                      <th>Analyser</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tracks.map((t) => (
-                      <tr key={t.index}>
-                        <td>@{t.index}</td>
-                        <td>{t.language ?? "?"}</td>
-                        <td>{t.codec ?? "?"}</td>
-                        <td>
-                          <input
-                            type="radio"
-                            name="reference"
-                            checked={referenceIndex === t.index}
-                            onChange={() => handleReferenceChange(t.index)}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="checkbox"
-                            disabled={referenceIndex === t.index}
-                            checked={targetIndices.includes(t.index)}
-                            onChange={() => toggleTarget(t.index)}
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+        <div className="left-column">
+          <div className="file-bar">
+            <button className="primary-button" onClick={handleOpenFile}>
+              Ouvrir un fichier
+            </button>
+            {filePath && (
+              <span className="file-path" title={filePath}>
+                {basename(filePath)}
+              </span>
+            )}
+            {prefetching && (
+              <span className="prefetch-status" title="Analyse des pistes en arrière-plan pour accélérer le premier clic sur Analyser.">
+                Analyse audio en cours...
+              </span>
+            )}
+          </div>
 
-              <div className="tracks-actions">
-                <button
-                  className="primary-button"
-                  onClick={handleAnalyzeSelected}
-                  disabled={referenceIndex === null || targetIndices.length === 0 || anySelectedRunning}
-                  title="Détecte le décalage de chaque piste cochée par rapport à la référence (dérive et sauts nets inclus), avec la courbe correspondante."
-                >
-                  {anySelectedRunning ? "Analyse en cours..." : "Analyser"}
-                </button>
-              </div>
-            </>
-          )}
-        </section>
+          <section className="panel field-tracks">
+            <h2>Pistes</h2>
+            {!tracks && !probeError && <p className="placeholder">Ouvre un fichier pour voir ses pistes.</p>}
+            {probeError && <p className="error">{probeError}</p>}
+            {tracks && tracks.length < 2 && (
+              <p className="error">Ce fichier n'a qu'une seule piste audio : rien à comparer.</p>
+            )}
+            {tracks && tracks.length >= 2 && (
+              <>
+                <div className="tracks-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Piste</th>
+                        <th>Langue</th>
+                        <th>Codec</th>
+                        <th>Réf.</th>
+                        <th>Analyser</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tracks.map((t) => (
+                        <tr key={t.index}>
+                          <td>@{t.index}</td>
+                          <td>{t.language ?? "?"}</td>
+                          <td>{t.codec ?? "?"}</td>
+                          <td>
+                            <input
+                              type="radio"
+                              name="reference"
+                              checked={referenceIndex === t.index}
+                              onChange={() => handleReferenceChange(t.index)}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="checkbox"
+                              disabled={referenceIndex === t.index}
+                              checked={targetIndices.includes(t.index)}
+                              onChange={() => toggleTarget(t.index)}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="tracks-actions">
+                  <button
+                    className="primary-button"
+                    onClick={handleAnalyzeSelected}
+                    disabled={referenceIndex === null || targetIndices.length === 0 || anySelectedRunning}
+                    title="Détecte le décalage de chaque piste cochée par rapport à la référence (dérive et sauts nets inclus), avec la courbe correspondante."
+                  >
+                    {anySelectedRunning ? "Analyse en cours..." : "Analyser"}
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
 
         <section className="panel field-analysis">
           <h2>Analyse</h2>
