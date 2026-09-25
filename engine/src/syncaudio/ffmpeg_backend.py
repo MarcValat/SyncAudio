@@ -126,7 +126,13 @@ def probe_stream_start_time(path: str, stream_index: int) -> float:
     Method: ffmpeg's default output muxing normalizes away a stream's start
     time (``-avoid_negative_ts make_zero``); isolating the stream into its
     own container with ``-copyts`` (which disables that) and re-probing it
-    reveals ffmpeg's own internal understanding of the delay. Best-effort:
+    reveals ffmpeg's own internal understanding of the delay. The delay is
+    fixed at the stream's very first packet, so ``-t`` caps the copy to a
+    few seconds instead of the whole track -- this runs synchronously inside
+    ``/probe``, once per track, before the GUI can show anything, so it must
+    stay fast even on a multi-hour file (unlike the prefetch that follows
+    `/probe`, which deliberately does decode every track in full, but in the
+    background, after the track list is already on screen). Best-effort:
     returns 0.0 on any failure rather than raising, since this must never
     break the actual detection/render pipeline it's decoupled from.
     """
@@ -136,7 +142,7 @@ def probe_stream_start_time(path: str, stream_index: int) -> float:
         extract = subprocess.run(
             [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", path, "-map", f"0:a:{stream_index}", "-c", "copy", "-copyts", tmp_path,
+                "-i", path, "-map", f"0:a:{stream_index}", "-c", "copy", "-copyts", "-t", "5", tmp_path,
             ],
             capture_output=True,
         )
