@@ -17,7 +17,16 @@
   --radius-sm: 8px;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05);
 
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  /* Native system-font stacks, not a webfont: this is a desktop app (no
+     network dependency to resolve correctly), and "Inter, Avenir, ..."
+     never actually resolved to any of those on Windows (none installed)
+     -- it silently fell through to plain Arial. This stack instead
+     resolves to each OS's own clean, modern UI font (Segoe UI on Windows,
+     San Francisco on macOS, Roboto/the desktop's default on Linux). */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, "Cascadia Code", "Segoe UI Mono", Consolas, "SF Mono", Menlo, monospace;
+
+  font-family: var(--font-sans);
   font-size: 16px;
   line-height: 24px;
   font-weight: 400;
@@ -240,7 +249,7 @@ button:focus-visible {
 }
 
 .file-path {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 0.85em;
   color: var(--text-muted);
   max-width: 100%;
@@ -475,7 +484,7 @@ button:focus-visible {
   overflow-x: hidden;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--surface-alt);
   border-radius: var(--radius-sm);
