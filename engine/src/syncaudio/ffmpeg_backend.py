@@ -188,6 +188,32 @@ def probe_subtitle_codec(path: str, index: int) -> str:
     return subtitle_streams[index]["codec"]
 
 
+_ANY_STREAM_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]*\])?(?:\((?P<lang>[^)]+)\))?:\s*(?P<kind>\w+):")
+_TITLE_TAG_RE = re.compile(r"^\s+title\s*: (?P<title>.*)$")
+
+
+def probe_stream_tags(path: str, kind: str) -> list[dict[str, str]]:
+    """``language``/``title`` tags of every ``kind`` stream (``"Audio"``,
+    ``"Subtitle"``...), indexed like ffmpeg's ``0:a:N``/``0:s:N`` selectors.
+
+    Decodes ffmpeg's output as UTF-8 explicitly: it writes tags as UTF-8
+    bytes, and the platform default (cp1252 on Windows) would mangle any
+    accented title.
+    """
+    proc = subprocess.run([resolve_ffmpeg(), "-hide_banner", "-i", path], capture_output=True)
+    tags: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in proc.stderr.decode("utf-8", errors="replace").splitlines():
+        if stream := _ANY_STREAM_RE.match(line):
+            current = None
+            if stream["kind"] == kind:
+                current = {"language": stream["lang"]} if stream["lang"] else {}
+                tags.append(current)
+        elif current is not None and (title := _TITLE_TAG_RE.match(line)):
+            current.setdefault("title", title["title"])
+    return tags
+
+
 def probe_subtitle_count(path: str) -> int:
     """Return how many subtitle streams ``path`` has."""
     return len(_list_subtitle_streams(path))

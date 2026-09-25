@@ -9,7 +9,7 @@ import pytest
 
 from syncaudio.align import estimate_offset
 from syncaudio.features import extract_envelope
-from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, resolve_ffmpeg
+from syncaudio.ffmpeg_backend import extract_pcm, parse_track_spec, probe_audio_streams, probe_stream_tags, resolve_ffmpeg
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
     TrackCorrection,
@@ -423,6 +423,9 @@ def segmented_cross_file_fixture(tmp_path: Path) -> tuple[Path, Path, float, flo
             "-i", str(donor_wav), "-i", str(srt_path),
             "-map", "0:a", "-map", "1:s",
             "-metadata:s:a:0", "language=fre",
+            "-metadata:s:a:0", "title=VF Stéréo",
+            "-metadata:s:s:0", "language=fre",
+            "-metadata:s:s:0", "title=Forcés",
             str(donor_mkv),
         ],
         check=True, capture_output=True,
@@ -478,6 +481,12 @@ def test_render_segmented_rewrites_imported_subtitle_timestamps(
     # audio itself was shifted.
     assert abs(starts[0] - cue_before_s) < 0.3
     assert abs(starts[1] - (cue_after_s - delta_s)) < 0.3
+
+    # Re-encoded audio and rewritten subtitles keep their source's name.
+    audio_tags = probe_stream_tags(output_path, "Audio")
+    assert audio_tags[0] == {"language": "jpn"}
+    assert audio_tags[1] == {"language": "fre", "title": "VF Stéréo"}
+    assert probe_stream_tags(output_path, "Subtitle") == [{"language": "fre", "title": "Forcés"}]
 
 
 @pytest.fixture()

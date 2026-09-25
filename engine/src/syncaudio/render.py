@@ -13,6 +13,7 @@ from syncaudio.ffmpeg_backend import (
     probe_audio_streams,
     probe_duration,
     probe_subtitle_codec,
+    probe_stream_tags,
     probe_subtitle_count,
     resolve_ffmpeg,
 )
@@ -206,6 +207,21 @@ def plan_segmented_correction(
     return SegmentedTrackCorrection(track=candidate, language=language, segments=segs)
 
 
+def _source_title(spec: AudioTrackSpec, kind: str) -> str | None:
+    tags = probe_stream_tags(spec.path, kind)
+    idx = _stream_index(spec)
+    return tags[idx].get("title") if idx < len(tags) else None
+
+
+def _title_args(spec: AudioTrackSpec, kind: str, out_selector: str) -> list[str]:
+    """Carry a source track's title over explicitly: re-encoded (filtered) or
+    re-imported streams don't inherit their source's tags the way plain
+    stream copies do, and ``-map_metadata`` can't be used instead since any
+    stream-level use of it disables tag copying for every other stream."""
+    title = _source_title(spec, kind)
+    return [f"-metadata:s:{out_selector}", f"title={title}"] if title else []
+
+
 def _run(cmd: list[str]) -> None:
     proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0:
@@ -287,7 +303,7 @@ def render(
             cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", corr.track.path, "-map", f"0:a:{idx}"]
             if filt:
                 cmd += ["-af", filt]
-            cmd += ["-t", str(ref_duration), str(track_out)]
+            cmd += [*_title_args(corr.track, "Audio", "a:0"), "-t", str(ref_duration), str(track_out)]
             _run(cmd)
             written.append(str(track_out))
         for seg_corr in segmented_corrections:
@@ -300,6 +316,7 @@ def render(
                 "-i", seg_corr.track.path,
                 "-filter_complex", filt,
                 "-map", "[out]",
+                *_title_args(seg_corr.track, "Audio", "a:0"),
                 "-t", str(ref_duration), str(track_out),
             ]
             _run(cmd)
@@ -340,6 +357,7 @@ def render(
             audio_codec_args += [f"-c:a:{pos}", "copy"]
         if corr.language:
             metadata_args += [f"-metadata:s:a:{pos}", f"language={corr.language}"]
+        metadata_args += _title_args(spec, "Audio", f"a:{pos}")
         pos += 1
 
     for seg_corr in segmented_corrections:
@@ -352,6 +370,7 @@ def render(
         audio_codec_args += [f"-c:a:{pos}", "flac"]
         if seg_corr.language:
             metadata_args += [f"-metadata:s:a:{pos}", f"language={seg_corr.language}"]
+        metadata_args += _title_args(spec, "Audio", f"a:{pos}")
         pos += 1
 
     # A --subs pairing may point at a subtitle track that's already inside
@@ -379,6 +398,9 @@ def render(
         inputs.append(["-itsoffset", f"{-offset:.6f}", "-i", spec.path])
         sub_map_args += ["-map", f"{new_idx}:s:{idx}"]
 
+    native_sub_count = len(native_sub_map_args) // 2 if native_excluded_subs else probe_subtitle_count(input_path)
+    sub_pos = native_sub_count + len(imported_subs)
+
     with tempfile.TemporaryDirectory(prefix="syncaudio-subs-") as tmp_dir_name:
         tmp_dir = Path(tmp_dir_name)
         for spec, segs in segmented_imported_subs:
@@ -386,6 +408,13 @@ def render(
             new_idx = len(inputs)
             inputs.append(["-i", str(shifted)])
             sub_map_args += ["-map", f"{new_idx}:s:0"]
+            # A rewritten plain .srt/.ass file carries none of the source
+            # track's tags, unlike the stream copies above.
+            source_tags = probe_stream_tags(spec.path, "Subtitle")
+            tags = source_tags[_stream_index(spec)] if _stream_index(spec) < len(source_tags) else {}
+            for key, value in tags.items():
+                metadata_args += [f"-metadata:s:s:{sub_pos}", f"{key}={value}"]
+            sub_pos += 1
 
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
         for inp in inputs:
