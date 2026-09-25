@@ -10,6 +10,10 @@ export interface TrackInfo {
   language: string | null;
   channels: number | null;
   sample_rate: number | null;
+  // Container-level presentation delay (e.g. from mkvtoolnix's --sync), if
+  // any -- display-only, see the engine's probe_stream_start_time docstring
+  // for why detection/render intentionally ignore it.
+  start_time: number;
 }
 
 export interface ProbeResponse {
@@ -98,7 +102,11 @@ export async function startPrefetchJob(path: string, trackIndices: number[]): Pr
  */
 export async function fetchClip(path: string, index: number, start: number, duration: number): Promise<Blob> {
   const params = new URLSearchParams({ path, index: String(index), start: String(start), duration: String(duration) });
-  const resp = await fetch(`${BASE_URL}/clip?${params.toString()}`);
+  // no-store: this is re-fetched with a genuinely different `start` every
+  // time the user seeks, and must never come back stale from the browser's
+  // HTTP cache (the sidecar's plain Response doesn't set any cache headers
+  // of its own to prevent that).
+  const resp = await fetch(`${BASE_URL}/clip?${params.toString()}`, { cache: "no-store" });
   if (!resp.ok) throw new Error(await readErrorDetail(resp));
   return resp.blob();
 }

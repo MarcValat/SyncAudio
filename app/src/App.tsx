@@ -55,6 +55,10 @@ function App() {
 
   const [analyses, setAnalyses] = useState<Record<number, TrackAnalysis>>({});
   const [editingTrack, setEditingTrack] = useState<number | null>(null);
+  // Which analyzed track's tab is showing -- only one card is ever rendered
+  // at a time (see field-analysis below), so an arbitrary number of
+  // analyzed tracks never needs the panel itself to scroll.
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState<number | null>(null);
 
   const pollHealth = useCallback(() => {
     let cancelled = false;
@@ -94,6 +98,7 @@ function App() {
     setProbeError(null);
     setAnalyses({});
     setEditingTrack(null);
+    setActiveAnalysisTab(null);
 
     try {
       const res = await probe(selected);
@@ -179,6 +184,11 @@ function App() {
     if (referenceIndex === null) return;
     for (const idx of targetIndices) {
       analyzeTrack(idx, referenceIndex);
+    }
+    if (targetIndices.length > 0) {
+      // Keep whatever tab the user's already looking at if it's still part
+      // of this run; otherwise default to the first newly-analyzed track.
+      setActiveAnalysisTab((current) => (current !== null && targetIndices.includes(current) ? current : targetIndices[0]));
     }
   }
 
@@ -317,53 +327,81 @@ function App() {
           {analyzedTracks.length === 0 && (
             <p className="placeholder">Coche une ou plusieurs pistes à corriger, puis clique sur « Analyser ».</p>
           )}
-          {analyzedTracks.map((t) => {
-            const entry = analyses[t.index];
-            return (
-              <div className={`analysis-card status-${entry.status}`} key={t.index}>
-                <h3>
-                  Piste @{t.index} ({t.language ?? "?"})
-                </h3>
-                <LogPanel lines={entry.log} />
-                {entry.error && <p className="error">{entry.error}</p>}
-                {entry.status === "running" && !entry.result && <p className="placeholder">Analyse en cours...</p>}
-                {entry.result && (
-                  <div className="segments-result">
-                    <p>
-                      {entry.result.segments.length} segment
-                      {entry.result.segments.length > 1 ? "s" : ""}
-                      <button className="small-button edit-button" onClick={() => setEditingTrack(t.index)}>
-                        Modifier
-                      </button>
-                      <button
-                        className="small-button edit-button"
-                        onClick={() => renderTrack(t.index)}
-                        disabled={entry.rendering}
-                      >
-                        {entry.rendering ? "Export en cours..." : "Exporter cette piste"}
-                      </button>
-                    </p>
-                    <SegmentChart segments={entry.result.segments} />
-                    {filePath && (
-                      <TrackPreview
-                        filePath={filePath}
-                        referenceIndex={entry.referenceIndex}
-                        trackIndex={t.index}
-                        segments={entry.result.segments}
-                      />
-                    )}
-                    <LogPanel lines={entry.renderLog} />
-                    {entry.renderError && <p className="error">{entry.renderError}</p>}
-                    {entry.renderResult && (
-                      <p className="render-success" title={entry.renderResult.written.join(", ")}>
-                        Fichier écrit : {entry.renderResult.written.map(basename).join(", ")}
-                      </p>
-                    )}
+          {analyzedTracks.length > 0 && (
+            <div className="analysis-tabs">
+              {analyzedTracks.map((t) => {
+                const entry = analyses[t.index];
+                return (
+                  <button
+                    key={t.index}
+                    className={`analysis-tab status-${entry.status}${activeAnalysisTab === t.index ? " active" : ""}`}
+                    onClick={() => setActiveAnalysisTab(t.index)}
+                  >
+                    Piste @{t.index}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {analyzedTracks
+            .filter((t) => t.index === activeAnalysisTab)
+            .map((t) => {
+              const entry = analyses[t.index];
+              return (
+                <div className={`analysis-card status-${entry.status}`} key={t.index}>
+                  <div className="analysis-top">
+                    <div className="analysis-summary">
+                      <h3>
+                        Piste @{t.index} ({t.language ?? "?"})
+                      </h3>
+                      <LogPanel lines={entry.log} />
+                      {entry.error && <p className="error">{entry.error}</p>}
+                      {entry.status === "running" && !entry.result && (
+                        <p className="placeholder">Analyse en cours...</p>
+                      )}
+                      {entry.result && (
+                        <p>
+                          {entry.result.segments.length} segment
+                          {entry.result.segments.length > 1 ? "s" : ""}
+                          <button className="small-button edit-button" onClick={() => setEditingTrack(t.index)}>
+                            Modifier
+                          </button>
+                          <button
+                            className="small-button edit-button"
+                            onClick={() => renderTrack(t.index)}
+                            disabled={entry.rendering}
+                          >
+                            {entry.rendering ? "Export en cours..." : "Exporter cette piste"}
+                          </button>
+                        </p>
+                      )}
+                    </div>
+                    {entry.result && <SegmentChart segments={entry.result.segments} />}
                   </div>
-                )}
-              </div>
-            );
-          })}
+                  {entry.result && (
+                    <div className="segments-result">
+                      {filePath && (
+                        <TrackPreview
+                          filePath={filePath}
+                          referenceIndex={entry.referenceIndex}
+                          trackIndex={t.index}
+                          segments={entry.result.segments}
+                          referenceStartTime={tracks?.find((tr) => tr.index === entry.referenceIndex)?.start_time ?? 0}
+                          trackStartTime={t.start_time}
+                        />
+                      )}
+                      <LogPanel lines={entry.renderLog} />
+                      {entry.renderError && <p className="error">{entry.renderError}</p>}
+                      {entry.renderResult && (
+                        <p className="render-success" title={entry.renderResult.written.join(", ")}>
+                          Fichier écrit : {entry.renderResult.written.map(basename).join(", ")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
         </section>
       </main>
 

@@ -131,8 +131,15 @@ body {
   grid-column: 1;
 }
 
+/* Flex column so the single visible tab's content (see analysis-tabs/
+   analysis-card below) can be squeezed to fit the available height instead
+   of needing to scroll -- min-height:0 is load-bearing here too, same trap
+   as .app-main above. */
 .field-analysis {
   grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .panel {
@@ -144,7 +151,11 @@ body {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 1em 1.1em;
-  overflow: auto;
+  /* No section scrolls internally: field-tracks' content is always small
+     (a handful of table rows), and field-analysis only ever shows one
+     analysis tab at a time, whose content shrinks to fit (see the flex
+     chain below) -- overflow is a last-resort clip, not an expected path. */
+  overflow: hidden;
   text-align: left;
   /* Windows paths have no spaces to break on -- without this, a long one
      (as in a result line naming the analyzed track) overflows the panel
@@ -153,6 +164,7 @@ body {
 }
 
 .panel h2 {
+  flex: 0 0 auto;
   margin: 0 0 0.7em;
   font-size: 0.8em;
   font-weight: 700;
@@ -249,10 +261,6 @@ button:focus-visible {
   font-size: 0.85em;
 }
 
-.segments-result {
-  margin-top: 0.5em;
-}
-
 .edit-button {
   margin-left: 0.6em;
 }
@@ -265,10 +273,46 @@ button:focus-visible {
   margin-top: 1em;
 }
 
-/* One card per analyzed track, with a left accent bar reflecting its state
-   at a glance (running/done/error) instead of having to read the log. */
+/* One tab per analyzed track (App.tsx only ever renders the active one's
+   card below) -- this is what lets an arbitrary number of analyzed tracks
+   never need field-analysis itself to scroll. */
+.analysis-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.3em;
+  flex-wrap: wrap;
+  margin-bottom: 0.6em;
+}
+
+.analysis-tab {
+  padding: 0.35em 0.8em;
+  font-size: 0.85em;
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.analysis-tab.status-running {
+  border-left-color: var(--accent);
+}
+.analysis-tab.status-done {
+  border-left-color: var(--success);
+}
+.analysis-tab.status-error {
+  border-left-color: var(--danger);
+}
+.analysis-tab.active {
+  background: var(--surface-alt);
+  font-weight: 700;
+}
+
+/* The single visible card, with a left accent bar reflecting its state at a
+   glance (running/done/error). A flex column itself so its content --
+   ultimately the waveforms inside .preview -- can shrink to fit whatever
+   height field-analysis has left, instead of overflowing into a scroll. */
 .analysis-card {
-  margin-bottom: 1.1em;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   padding: 0.2em 0 0.2em 0.9em;
   border-left: 3px solid var(--border);
 }
@@ -283,23 +327,63 @@ button:focus-visible {
   border-left-color: var(--danger);
 }
 
-.analysis-card:last-child {
-  margin-bottom: 0;
-}
-
 .analysis-card h3 {
+  flex: 0 0 auto;
   margin: 0 0 0.5em;
   font-size: 0.95em;
   font-weight: 600;
 }
 
+.segments-result {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 0.5em;
+}
+
+/* Everything in the card except .preview (segment count/buttons, the
+   chart, the render log/result) keeps its natural size; .preview alone
+   (the waveform comparison) is the flexible region that actually shrinks. */
+.segments-result > :not(.preview),
+.analysis-card > :not(.segments-result) {
+  flex: 0 0 auto;
+}
+
+.analysis-top {
+  display: flex;
+  gap: 1.5em;
+  align-items: flex-start;
+}
+
+.analysis-summary {
+  flex: 0 0 auto;
+  min-width: 14em;
+}
+
+.analysis-top .segment-chart {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+}
+
 .preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   margin-top: 0.7em;
   padding-top: 0.6em;
   border-top: 1px solid var(--border);
 }
 
+.preview > .error {
+  flex: 0 0 auto;
+}
+
 .preview-segment-picks {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.5em;
@@ -310,6 +394,7 @@ button:focus-visible {
 }
 
 .preview-controls {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.6em;
