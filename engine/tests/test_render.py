@@ -127,6 +127,90 @@ def test_render_corrects_offset_close_to_zero_residual(offset_mkv: tuple[Path, f
     assert abs(residual.offset_seconds) < 0.05
 
 
+def _build_single_codec_mkv(tmp_path: Path, name: str, codec: str, codec_args: list[str]) -> tuple[Path, float]:
+    sr = 44100
+    duration_s = 20.0
+    offset_s = 2.0
+
+    bed = _make_bed(duration_s, sr, seed=80)
+    silence = np.zeros(int(offset_s * sr))
+    shifted = np.concatenate([silence, bed])[: len(bed)]
+    ref_wav, cand_wav = tmp_path / f"{name}_ref.wav", tmp_path / f"{name}_cand.wav"
+    _write_wav(ref_wav, bed, sr)
+    _write_wav(cand_wav, shifted, sr)
+
+    mkv = tmp_path / f"{name}.mkv"
+    subprocess.run(
+        [
+            resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration_s}",
+            "-i", str(ref_wav), "-i", str(cand_wav),
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:a", codec, *codec_args,
+            "-shortest", str(mkv),
+        ],
+        check=True, capture_output=True,
+    )
+    assert probe_audio_streams(str(mkv))[1].codec.split()[0] == codec
+    return mkv, offset_s
+
+
+def test_render_corrected_track_matches_source_codec_instead_of_always_flac(tmp_path: Path) -> None:
+    """A corrected track used to always come back as flac (lossless), which
+    for a lossy source (ac3 here) made the export noticeably bigger than the
+    original for no audible benefit -- it should now match the source
+    codec (and stay close to its size) instead."""
+    mkv, offset_s = _build_single_codec_mkv(tmp_path, "ac3", "ac3", ["-b:a", "192k"])
+    ffmpeg = resolve_ffmpeg()
+
+    corrections = plan_corrections(_spec(mkv, 0), [_spec(mkv, 1)])
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    render(str(mkv), reference_index=0, corrections=corrections, output_path=output_path)
+
+    corrected = probe_audio_streams(output_path)[1]
+    assert corrected.codec.split()[0] == "ac3"
+
+    # Direct, apples-to-apples proof this is smaller than the old
+    # always-flac behaviour would have produced: encode the exact same
+    # corrected audio filter output to flac instead, and compare just that
+    # one track's size against the ac3 track actually written above (not
+    # the whole output file, which also carries video and the untouched
+    # reference track -- irrelevant to what changed here).
+    corrected_track = tmp_path / "corrected.ac3"
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", output_path, "-map", "0:a:1", "-c", "copy", str(corrected_track)],
+        check=True, capture_output=True,
+    )
+    flac_out = tmp_path / "corrected.flac"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(mkv),
+            "-filter_complex", f"[0:a:1]{correction_filter(offset_s)}[a1]",
+            "-map", "[a1]", "-c:a", "flac",
+            # correction_filter's apad pads indefinitely without a cap --
+            # render() always caps it with -t ref_duration, this direct
+            # ffmpeg call must too, or it never terminates.
+            "-t", "20", str(flac_out),
+        ],
+        check=True, capture_output=True,
+    )
+    assert flac_out.stat().st_size > corrected_track.stat().st_size
+
+
+def test_render_aac_source_reencodes_to_opus_not_aac(tmp_path: Path) -> None:
+    """Deliberate exception to "match the source codec": ffmpeg's only free
+    AAC encoder is single-threaded and measured ~50x slower than flac on a
+    real track (see _ENCODER_FOR_CODEC's comment) -- aac sources go to opus
+    instead, to keep a render from taking several extra minutes."""
+    mkv, _offset_s = _build_single_codec_mkv(tmp_path, "aac", "aac", ["-b:a", "192k"])
+
+    corrections = plan_corrections(_spec(mkv, 0), [_spec(mkv, 1)])
+    output_path = str(mkv.with_name("out.synced.mkv"))
+    render(str(mkv), reference_index=0, corrections=corrections, output_path=output_path)
+
+    assert probe_audio_streams(output_path)[1].codec.split()[0] == "opus"
+
+
 def test_render_audio_only_exports_corrected_track(offset_mkv: tuple[Path, float]) -> None:
     mkv, offset_s = offset_mkv
     input_path = str(mkv)
@@ -136,7 +220,10 @@ def test_render_audio_only_exports_corrected_track(offset_mkv: tuple[Path, float
     written = render(input_path, reference_index=0, corrections=corrections, output_path=output_path, audio_only=True)
 
     assert len(written) == 1
-    assert written[0].endswith(f"out.synced.{mkv.stem}.track1.flac")
+    # offset_mkv's candidate track is muxed with ffmpeg's own default codec
+    # for a raw PCM input into an mkv, which is vorbis -- so the corrected
+    # export matches that (see _EXTENSION_FOR_ENCODER), not always .flac.
+    assert written[0].endswith(f"out.synced.{mkv.stem}.track1.ogg")
     assert Path(written[0]).exists()
 
 

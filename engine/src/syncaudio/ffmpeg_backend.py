@@ -18,6 +18,7 @@ _STREAM_RE = re.compile(
 _DURATION_RE = re.compile(r"Duration:\s*(?P<h>\d+):(?P<m>\d+):(?P<s>\d+(?:\.\d+)?)")
 _DURATION_START_RE = re.compile(r"Duration:\s*\d+:\d+:\d+(?:\.\d+)?,\s*start:\s*(?P<start>-?\d+(?:\.\d+)?)")
 _SUBTITLE_STREAM_RE = re.compile(r"^\s*Stream #\d+:(?P<index>\d+)(?:\([^)]+\))?:\s*Subtitle:\s*(?P<codec>\S+)")
+_BITRATE_RE = re.compile(r"(?P<kbps>\d+)\s*kb/s")
 
 
 class FFmpegError(RuntimeError):
@@ -81,6 +82,7 @@ def probe_audio_streams(path: str) -> list[AudioStreamInfo]:
             continue
         channels_raw = match.group("channels").strip()
         channels = _CHANNEL_LAYOUTS.get(channels_raw)
+        bitrate_match = _BITRATE_RE.search(line)
         streams.append(
             AudioStreamInfo(
                 index=len(streams),
@@ -88,6 +90,7 @@ def probe_audio_streams(path: str) -> list[AudioStreamInfo]:
                 language=match.group("lang"),
                 channels=channels,
                 sample_rate=int(match.group("rate")),
+                bit_rate=int(bitrate_match["kbps"]) * 1000 if bitrate_match else None,
             )
         )
     if not streams:

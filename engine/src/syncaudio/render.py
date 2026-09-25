@@ -17,7 +17,7 @@ from syncaudio.ffmpeg_backend import (
     probe_subtitle_count,
     resolve_ffmpeg,
 )
-from syncaudio.models import AudioTrackSpec
+from syncaudio.models import AudioStreamInfo, AudioTrackSpec
 from syncaudio.segments import DEFAULT_HOP_S, DEFAULT_MARGIN_S, DEFAULT_WINDOW_S, Segment, detect_segments
 from syncaudio.subtitles import format_for_codec, shift_subtitle_text
 
@@ -27,9 +27,82 @@ from syncaudio.subtitles import format_for_codec, shift_subtitle_text
 # offset (see engine/tests/fixtures/MANIFEST.json ground-truth comparisons).
 _NO_CORRECTION_THRESHOLD_S = 0.05
 
+# A corrected track is always re-encoded (its samples genuinely change --
+# trimmed, padded or time-stretched), so "copy" is never an option for it;
+# this maps its *source* codec to the closest free ffmpeg encoder, plus a
+# sensible default bitrate (bits/sec, None for a lossless encoder) used when
+# the source's own bitrate can't be probed -- common for MKV (no bitrate
+# field ffmpeg can read without decoding), unlike MP4's esds atom. Codecs
+# with no free ffmpeg encoder -- DTS(-HD), TrueHD/MLP and other proprietary
+# lossless surround formats -- and anything unrecognized fall back to
+# lossless flac: bigger file, but never a quality loss beyond what the
+# correction itself needs.
+#
+# aac sources are the one deliberate exception to "match the source codec":
+# ffmpeg's only free AAC encoder reports "Threading capabilities: none" and
+# measured ~15x realtime (vs flac's ~720x, ac3's ~316x, opus's ~85x) --
+# on a real movie that's several minutes just for this one step, and no
+# encoder option meaningfully helps (-aac_coder fast measured within 10% of
+# the default). Re-encoding to opus instead keeps the export fast and the
+# file small, at the cost of no longer being bit-for-bit the same codec as
+# the source -- a real tradeoff, but a stalled render is worse than a
+# slightly-not-aac file, and opus is well supported by modern players.
+_ENCODER_FOR_CODEC: dict[str, tuple[str, int | None]] = {
+    "aac": ("libopus", 192_000),
+    "ac3": ("ac3", 640_000),  # ac3's own maximum bitrate
+    "eac3": ("eac3", 768_000),
+    "mp3": ("libmp3lame", 320_000),
+    "opus": ("libopus", 192_000),
+    "flac": ("flac", None),
+    "pcm_s16le": ("pcm_s16le", None),
+    "pcm_s24le": ("pcm_s24le", None),
+    "pcm_s32le": ("pcm_s32le", None),
+}
+_LOSSLESS_ENCODERS = {"flac", "pcm_s16le", "pcm_s24le", "pcm_s32le"}
+# libvorbis's bitrate mode (-b:a) is unreliable across arbitrary (bitrate,
+# channel-count) combinations -- empirically, mono at a bitrate as ordinary
+# as 256kbps reliably fails to even open the encoder ("encoder setup
+# failed"). Quality mode sidesteps that entirely, so vorbis always uses it
+# instead of trying to match the source's own bitrate (fine in practice:
+# vorbis is a rare source codec here, and quality 8 is already
+# near-transparent for any content).
+_VORBIS_QUALITY = "8"
+# Matches _ENCODER_FOR_CODEC's encoders, for the audio_only branch's output
+# filenames (the main remux branch always writes to .mkv, which accepts any
+# of these without needing a matching extension).
+_EXTENSION_FOR_ENCODER = {
+    "ac3": "ac3",
+    "eac3": "eac3",
+    "libmp3lame": "mp3",
+    "libopus": "opus",
+    "libvorbis": "ogg",
+    "flac": "flac",
+    "pcm_s16le": "wav",
+    "pcm_s24le": "wav",
+    "pcm_s32le": "wav",
+}
+
 
 def _stream_index(spec: AudioTrackSpec) -> int:
     return spec.stream_index if spec.stream_index is not None else 0
+
+
+def _audio_encode_args(stream: AudioStreamInfo | None, selector: str) -> list[str]:
+    """``-c:a:<selector> ... [-b:a:<selector> ...]`` matching a corrected
+    track's own source codec (see ``_ENCODER_FOR_CODEC``) and, when known,
+    its own bitrate. ``stream`` is ``None`` when the source codec couldn't
+    be probed at all -- also falls back to flac then."""
+    name = (stream.codec if stream else None) or ""
+    name = name.split("(")[0].split()[0].strip().lower()
+    if name == "vorbis":
+        return [f"-c:a:{selector}", "libvorbis", f"-q:a:{selector}", _VORBIS_QUALITY]
+    encoder, default_bitrate = _ENCODER_FOR_CODEC.get(name, ("flac", None))
+    args = [f"-c:a:{selector}", encoder]
+    if encoder not in _LOSSLESS_ENCODERS:
+        bitrate = (stream.bit_rate if stream and stream.bit_rate else None) or default_bitrate
+        if bitrate:
+            args += [f"-b:a:{selector}", str(bitrate)]
+    return args
 
 
 @dataclass(frozen=True)
@@ -282,15 +355,26 @@ def render(
     (not just globally offset) to follow the same per-segment correction as
     their paired audio.
 
-    With ``audio_only``, writes one corrected ``.flac`` per entry of
+    With ``audio_only``, writes one corrected file per entry of
     ``corrections``/``segmented_corrections`` next to ``output_path`` (named
     after its stem and source file) instead of a remuxed container, and
-    returns their paths. Otherwise remuxes into a single MKV -- corrected
-    tracks re-encoded to flac, everything else stream-copied -- capped to the
-    reference's duration, and returns ``[output_path]``.
+    returns their paths. Otherwise remuxes into a single MKV -- everything
+    else stream-copied -- capped to the reference's duration, and returns
+    ``[output_path]``. Either way, a corrected track is re-encoded to match
+    its own source codec (and bitrate, when known), not always flac -- see
+    ``_ENCODER_FOR_CODEC``.
     """
     ffmpeg = resolve_ffmpeg()
     ref_duration = probe_duration(input_path)
+
+    _streams_by_path: dict[str, dict[int, AudioStreamInfo]] = {}
+
+    def stream_info(spec: AudioTrackSpec) -> AudioStreamInfo | None:
+        streams = _streams_by_path.get(spec.path)
+        if streams is None:
+            streams = {s.index: s for s in probe_audio_streams(spec.path)}
+            _streams_by_path[spec.path] = streams
+        return streams.get(_stream_index(spec))
 
     if audio_only:
         out_base = Path(output_path)
@@ -298,24 +382,29 @@ def render(
         for corr in corrections:
             idx = _stream_index(corr.track)
             filt = correction_filter(corr.offset_seconds)
+            encode_args = _audio_encode_args(stream_info(corr.track), "0")
+            ext = _EXTENSION_FOR_ENCODER[encode_args[1]]
             donor = Path(corr.track.path).stem
-            track_out = out_base.with_name(f"{out_base.stem}.{donor}.track{idx}.flac")
+            track_out = out_base.with_name(f"{out_base.stem}.{donor}.track{idx}.{ext}")
             cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", corr.track.path, "-map", f"0:a:{idx}"]
             if filt:
                 cmd += ["-af", filt]
-            cmd += [*_title_args(corr.track, "Audio", "a:0"), "-t", str(ref_duration), str(track_out)]
+            cmd += [*encode_args, *_title_args(corr.track, "Audio", "a:0"), "-t", str(ref_duration), str(track_out)]
             _run(cmd)
             written.append(str(track_out))
         for seg_corr in segmented_corrections:
             idx = _stream_index(seg_corr.track)
+            encode_args = _audio_encode_args(stream_info(seg_corr.track), "0")
+            ext = _EXTENSION_FOR_ENCODER[encode_args[1]]
             donor = Path(seg_corr.track.path).stem
-            track_out = out_base.with_name(f"{out_base.stem}.{donor}.track{idx}.flac")
+            track_out = out_base.with_name(f"{out_base.stem}.{donor}.track{idx}.{ext}")
             filt = segment_correction_filter(seg_corr.segments, f"0:a:{idx}", "out")
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-i", seg_corr.track.path,
                 "-filter_complex", filt,
                 "-map", "[out]",
+                *encode_args,
                 *_title_args(seg_corr.track, "Audio", "a:0"),
                 "-t", str(ref_duration), str(track_out),
             ]
@@ -351,7 +440,7 @@ def render(
             label = f"a{pos}"
             filter_complex_parts.append(f"[{in_idx}:a:{idx}]{filt}[{label}]")
             audio_map_args += ["-map", f"[{label}]"]
-            audio_codec_args += [f"-c:a:{pos}", "flac"]
+            audio_codec_args += _audio_encode_args(stream_info(spec), str(pos))
         else:
             audio_map_args += ["-map", f"{in_idx}:a:{idx}"]
             audio_codec_args += [f"-c:a:{pos}", "copy"]
@@ -367,7 +456,7 @@ def render(
         label = f"a{pos}"
         filter_complex_parts.append(segment_correction_filter(seg_corr.segments, f"{in_idx}:a:{idx}", label))
         audio_map_args += ["-map", f"[{label}]"]
-        audio_codec_args += [f"-c:a:{pos}", "flac"]
+        audio_codec_args += _audio_encode_args(stream_info(spec), str(pos))
         if seg_corr.language:
             metadata_args += [f"-metadata:s:a:{pos}", f"language={seg_corr.language}"]
         metadata_args += _title_args(spec, "Audio", f"a:{pos}")

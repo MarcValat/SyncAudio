@@ -31,6 +31,11 @@ class AudioStreamInfo:
     language: str | None
     channels: int | None = None
     sample_rate: int | None = None
+    # In bits/sec, when ffmpeg's probe reports one -- common for MP4-sourced
+    # tracks (their container stores it directly), rare for MKV (usually
+    # None there, since Matroska doesn't carry a bitrate field ffmpeg can
+    # read without actually decoding).
+    bit_rate: int | None = None
 
 
 @dataclass(frozen=True)
