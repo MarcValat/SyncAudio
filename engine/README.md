@@ -62,12 +62,14 @@ uv run syncaudio align ref.wav candidate.wav --json
 uv run syncaudio render film.mkv --reference 0 --track 1
 ```
 
-Détecte le décalage de la piste `@1` par rapport à la référence `@0`, puis écrit `film.synced.mkv` : vidéo, sous-titres et pièces jointes copiés tels quels, piste de référence copiée telle quelle, piste corrigée réencodée (flac) et casée sur la durée de la référence (silence ajouté si elle devient trop courte, coupée si trop longue). Sans `--track`, toutes les pistes sauf la référence sont corrigées.
+Détecte le décalage de la piste `@1` par rapport à la référence `@0`, puis écrit `film.synced.mkv` : vidéo, sous-titres et pièces jointes copiés tels quels, piste de référence copiée telle quelle, piste corrigée réencodée et casée sur la durée de la référence (silence ajouté si elle devient trop courte, coupée si trop longue). Sans `--track`, toutes les pistes sauf la référence sont corrigées.
+
+La piste corrigée est réencodée dans le même codec que sa source (même bitrate quand il est connu), pas toujours en flac — un flac systématique produisait un fichier final nettement plus gros qu'utile pour une source déjà compressée avec perte. Exception délibérée : une source AAC est réencodée en Opus plutôt qu'en AAC, car l'unique encodeur AAC libre de ffmpeg est mono-thread et nettement plus lent (~15x temps réel, contre ~300x+ pour les autres codecs gérés) — sur un film entier, ça peut ajouter plusieurs minutes pour un gain de fidélité marginal. Un codec source sans encodeur libre disponible (DTS(-HD), TrueHD/MLP...) retombe sur flac (sans perte, juste plus lourd).
 
 Autres options utiles :
 
 - `--dry-run` : affiche le décalage détecté et la correction prévue sans rien écrire.
-- `--audio-only` : exporte uniquement la/les piste(s) corrigée(s) en `.flac` (`<sortie>.<fichier>.trackN.flac`) au lieu de remuxer un MKV complet.
+- `--audio-only` : exporte uniquement la/les piste(s) corrigée(s) (`<sortie>.<fichier>.trackN.<ext>`, extension et codec selon la source — voir ci-dessus) au lieu de remuxer un MKV complet.
 - `-o/--output` : chemin de sortie (défaut : `<INPUT>.synced.mkv`).
 - `--only-imports` : n'inclut aucune piste de INPUT à part la référence (utile avec `--import-audio`/`--subs` ci-dessous, pour ne pas dupliquer une piste déjà présente dans INPUT).
 - `--start`/`--duration` : comme pour `align`, limite la fenêtre utilisée pour la *détection* (le rendu, lui, s'applique toujours au fichier entier).
@@ -137,7 +139,7 @@ Sur nos fixtures de test : une dérive de +3.4s en fin de piste retombe à un r�
 
 ### Accélérer sur de gros fichiers
 
-Le temps d'extraction (ffmpeg) et surtout d'analyse spectrale (HPSS) croît avec la durée traitée. Comme l'algorithme cherche un décalage **constant**, il n'a pas besoin de toute la piste : un extrait représentatif suffit. `--start` et `--duration` (en secondes) limitent l'extraction/analyse à une fenêtre de chaque piste, ce qui accélère le traitement dans les mêmes proportions :
+Le temps d'extraction (ffmpeg) et surtout d'analyse spectrale (HPSS) croît avec la durée traitée. Le filtrage médian de cette analyse (l'essentiel du temps) est parallélisé sur tous les cœurs disponibles automatiquement (~7s → ~1.5s sur une piste de 6 min avec 8 cœurs) ; au-delà, comme l'algorithme cherche un décalage **constant**, il n'a pas besoin de toute la piste : un extrait représentatif suffit. `--start` et `--duration` (en secondes) limitent l'extraction/analyse à une fenêtre de chaque piste, ce qui accélère le traitement dans les mêmes proportions :
 
 ```
 uv run syncaudio align film.mkv@0 vf.wav --start 300 --duration 600
@@ -150,7 +152,7 @@ N'analyse ici que les 10 minutes commençant à 5 minutes (utile pour sauter un 
 
 ## Sidecar HTTP (`serve`)
 
-Expose le même moteur (`probe`/`align`/`segments`/`render`) en HTTP, pour un futur client autre que le CLI (le GUI, notamment) :
+Expose le même moteur (`probe`/`align`/`segments`/`render`) en HTTP, pour un client autre que le CLI — c'est ce que l'app GUI (`app/`) lance et utilise en arrière-plan :
 
 ```
 uv run syncaudio serve
@@ -161,6 +163,12 @@ Démarre sur `http://127.0.0.1:8756` par défaut (`--host`/`--port` pour changer
 Deux façons d'appeler `align`/`segments`/`render` :
 - **Direct** (`POST /align`, `POST /segments`, `POST /render`) : bloque jusqu'à la fin, simple pour un script ou une vérification rapide.
 - **En job** (`POST /jobs/align`, `POST /jobs/segments`, `POST /jobs/render`) : retourne immédiatement un `job_id`, le traitement tourne en arrière-plan. `WS /jobs/{job_id}/ws` diffuse en direct les mêmes messages de progression que ceux affichés par le CLI (`[analyse] ...`), puis un message final `done` (avec le résultat) ou `error`. `GET /jobs/{job_id}` permet aussi d'interroger l'état à tout moment (utile en complément ou à la place de la WebSocket). C'est le mode à utiliser pour un GUI sur un vrai fichier (dizaines de secondes) : progression en direct plutôt qu'un bouton figé.
+
+Endpoints synchrones complémentaires, pensés pour le GUI :
+- `GET /probe?path=...` : liste les pistes audio (codec, langue, canaux, sample rate, délai de conteneur éventuel) — voir `probe` ci-dessus.
+- `GET /waveform?path=...&index=...&start=...&duration=...&buckets=...` : enveloppe d'amplitude (min/max) sous-échantillonnée d'une fenêtre de piste, pour dessiner une forme d'onde sans envoyer l'audio brut (`duration` omis = piste entière).
+- `GET /clip?path=...&index=...&start=...&duration=...` : court extrait audio jouable (WAV), pour une écoute avant/après correction — distinct de l'extraction d'analyse (mono 16 kHz), celui-ci garde le nombre de canaux et un sample rate normal.
+- `POST /jobs/prefetch` : lance en arrière-plan, pour une liste de pistes, le calcul coûteux (extraction + spectrogramme/enveloppe) que `segments`/`render` referaient sinon à chaque appel — un résultat déjà en cache (même fichier, piste, fenêtre) est réutilisé tel quel. À appeler juste après `/probe` pour que le premier `segments`/`render` sur ces pistes soit quasi instantané.
 
 ## Développement
 
