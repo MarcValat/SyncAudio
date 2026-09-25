@@ -26,9 +26,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
-from syncaudio.ffmpeg_backend import FFmpegError, probe_audio_streams
+from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
+from syncaudio.ffmpeg_backend import FFmpegError, extract_peaks, extract_wav_clip, probe_audio_streams, probe_stream_start_time
 from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
@@ -130,6 +132,12 @@ class TrackInfo(BaseModel):
     language: str | None
     channels: int | None
     sample_rate: int | None
+    # Container-level presentation delay (e.g. from mkvtoolnix's --sync), if
+    # any -- display-only: every extraction works on the track's own
+    # timeline with this delay excluded (see ffmpeg_backend._seek_args), so
+    # the GUI uses it only to show the residual offset a normal player,
+    # which does apply it, would see.
+    start_time: float
 
 
 class ProbeResponse(BaseModel):
@@ -146,10 +154,91 @@ def probe(path: str) -> ProbeResponse:
     return ProbeResponse(
         path=path,
         tracks=[
-            TrackInfo(index=s.index, codec=s.codec, language=s.language, channels=s.channels, sample_rate=s.sample_rate)
+            TrackInfo(
+                index=s.index,
+                codec=s.codec,
+                language=s.language,
+                channels=s.channels,
+                sample_rate=s.sample_rate,
+                start_time=probe_stream_start_time(path, s.index),
+            )
             for s in streams
         ],
     )
+
+
+_MAX_CLIP_DURATION_S = 30.0
+
+
+@app.get("/clip")
+def clip(path: str, index: int, start: float = 0.0, duration: float = 12.0) -> Response:
+    """A short playable WAV clip of one track, for the GUI's listen-before-render preview.
+
+    Synchronous (not a job): unlike a full-track analysis, extracting a
+    short window is fast enough (ffmpeg seeks straight to ``start`` instead
+    of decoding everything before it) that a progress stream would be
+    pointless overhead here.
+    """
+    spec = AudioTrackSpec(raw=f"{path}@{index}", path=path, stream_index=index)
+    try:
+        wav_bytes = extract_wav_clip(spec, start=max(0.0, start), duration=min(duration, _MAX_CLIP_DURATION_S))
+    except FFmpegError as exc:
+        raise _http_error(exc) from exc
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+class WaveformResponse(BaseModel):
+    duration: float
+    peaks_min: list[float]
+    peaks_max: list[float]
+
+
+@app.get("/waveform", response_model=WaveformResponse)
+def waveform(path: str, index: int, start: float = 0.0, duration: float | None = None, buckets: int = 800) -> WaveformResponse:
+    """Downsampled (min, max) waveform envelope for a track window, for the GUI's
+    always-visible, zoomable comparison view (see TrackPreview.tsx/Waveform.tsx).
+
+    Unlike ``/clip``, this never ships audio samples -- just ``buckets`` pairs
+    of floats -- so it stays cheap even for a whole multi-minute track at
+    once (``duration`` omitted), which is how the GUI learns a track's total
+    duration for its initial, fully-zoomed-out view.
+    """
+    spec = AudioTrackSpec(raw=f"{path}@{index}", path=path, stream_index=index)
+    try:
+        mins, maxes, actual_duration = extract_peaks(spec, buckets, start=max(0.0, start), duration=duration)
+    except FFmpegError as exc:
+        raise _http_error(exc) from exc
+    return WaveformResponse(duration=actual_duration, peaks_min=mins.tolist(), peaks_max=maxes.tolist())
+
+
+class PrefetchRequest(BaseModel):
+    tracks: list[TrackRef]
+    start: float = 0.0
+    duration: float | None = None
+
+
+class PrefetchResponse(BaseModel):
+    cached: int
+
+
+def _do_prefetch(req: PrefetchRequest, log: Callable[[str], None] = lambda _msg: None) -> PrefetchResponse:
+    for ref in req.tracks:
+        get_envelope(ref.to_spec(), ANALYSIS_SAMPLE_RATE, req.start, req.duration, log=log)
+    return PrefetchResponse(cached=len(req.tracks))
+
+
+@app.post("/jobs/prefetch", response_model=JobStarted)
+def start_prefetch_job(req: PrefetchRequest) -> JobStarted:
+    """Warm the analysis cache for every listed track in the background.
+
+    Meant to be fired (and forgotten -- errors here are non-fatal, a later
+    align/segments/render call will just redo the work) right after
+    `/probe` succeeds, so that by the time the user picks a reference and
+    clicks a detection button, the ~7s-per-track extraction+envelope cost
+    (see analysis_cache.py) is already paid.
+    """
+    job = start_job(lambda log: _do_prefetch(req, log).model_dump())
+    return JobStarted(job_id=job.id)
 
 
 class AlignRequest(BaseModel):
@@ -285,6 +374,19 @@ def _track_key(spec: AudioTrackSpec) -> tuple[str, int]:
     return (str(Path(spec.path).resolve()), idx)
 
 
+class SegmentOverride(BaseModel):
+    """Segments to use for a candidate as-is, skipping ``detect_segments`` for it.
+
+    Lets a caller that already ran ``/jobs/segments`` and let the user
+    manually edit the result (drag boundaries, merge segments, ...) render
+    exactly what was reviewed, instead of the server silently redoing its
+    own detection and discarding the edits.
+    """
+
+    track: TrackRef
+    segments: list[SegmentOut]
+
+
 class RenderRequest(BaseModel):
     input_path: str
     reference_index: int
@@ -295,6 +397,7 @@ class RenderRequest(BaseModel):
     output_path: str | None = None
     audio_only: bool = False
     segmented: bool = False
+    segment_overrides: list[SegmentOverride] = []
     window_s: float = DEFAULT_WINDOW_S
     hop_s: float = DEFAULT_HOP_S
     margin_s: float = DEFAULT_MARGIN_S
@@ -378,13 +481,25 @@ def _do_render(req: RenderRequest, log: Callable[[str], None] = _NO_LOG) -> Rend
 
     try:
         if req.segmented:
-            seg_corrections: list[SegmentedTrackCorrection] = [
-                plan_segmented_correction(
-                    reference_spec, spec, start=req.start, duration=req.duration,
-                    window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s, log=log,
-                )
-                for spec in candidates
-            ]
+            overrides = {_track_key(o.track.to_spec()): o.segments for o in req.segment_overrides}
+            seg_corrections: list[SegmentedTrackCorrection] = []
+            for spec in candidates:
+                override = overrides.get(_track_key(spec))
+                if override is not None:
+                    idx = spec.stream_index if spec.stream_index is not None else 0
+                    streams = {s.index: s for s in probe_audio_streams(spec.path)}
+                    language = streams[idx].language if idx in streams else None
+                    log(f"[segments] {spec.raw} : utilisation des segments fournis (édités manuellement)")
+                    seg_corrections.append(
+                        SegmentedTrackCorrection(track=spec, language=language, segments=[s.to_segment() for s in override])
+                    )
+                else:
+                    seg_corrections.append(
+                        plan_segmented_correction(
+                            reference_spec, spec, start=req.start, duration=req.duration,
+                            window_s=req.window_s, hop_s=req.hop_s, margin_s=req.margin_s, log=log,
+                        )
+                    )
             segmented_imported_subs = [
                 (pair.subs.to_spec(), seg_corrections[pos].segments) for pair, pos in zip(req.subs, subs_positions)
             ]

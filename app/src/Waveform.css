@@ -1,0 +1,128 @@
+/* flex:1 1 auto + min-height:0 here (and on each .waveform below) is what
+   lets the three waveforms shrink together to whatever height .preview has
+   left, instead of the panel ever needing to scroll -- same load-bearing
+   pattern as .app-main's comment in App.css. */
+.waveforms {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 0.4em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+}
+
+.waveform {
+  flex: 1 1 0;
+  min-height: 34px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: var(--radius-sm, 8px);
+  padding: 0.25em 0.5em;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.waveform-label {
+  flex: 0 0 auto;
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.1em;
+}
+
+.waveform-svg {
+  flex: 1 1 auto;
+  min-height: 14px;
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: pointer;
+}
+
+.waveform-zero {
+  stroke: currentColor;
+  opacity: 0.15;
+  stroke-width: 1;
+}
+
+.waveform-path {
+  fill: var(--accent);
+  opacity: 0.85;
+}
+
+.waveform-reference .waveform-path {
+  fill: var(--accent);
+}
+
+.waveform-candidate .waveform-path {
+  fill: #d38a39;
+}
+
+.waveform-final .waveform-path {
+  fill: var(--success, #2a8c4a);
+}
+
+.waveform-highlight {
+  opacity: 0.25;
+}
+
+.waveform-highlight.removed {
+  fill: var(--danger, #d33);
+}
+
+.waveform-highlight.added {
+  fill: var(--success, #2a8c4a);
+}
+
+.waveform-cursor {
+  stroke: var(--danger, #d33);
+  stroke-width: 2;
+}
+
+.waveform-ticks {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65em;
+  color: var(--text-muted);
+  margin-top: 0.1em;
+}
+
+.waveform-legend {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 1.2em;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin: 0.15em 0;
+}
+
+.waveform-legend-swatch {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  border-radius: 3px;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
+  opacity: 0.5;
+}
+
+.waveform-legend-swatch.removed {
+  background: var(--danger, #d33);
+}
+
+.waveform-legend-swatch.added {
+  background: var(--success, #2a8c4a);
+}
+
+.waveform-zoom-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.85em;
+  margin-bottom: 0.25em;
+}

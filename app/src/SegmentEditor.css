@@ -1,0 +1,137 @@
+.editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 2em;
+  box-sizing: border-box;
+}
+
+.editor-panel {
+  background: var(--surface, #f6f6f6);
+  color: inherit;
+  border-radius: var(--radius, 12px);
+  box-shadow: var(--shadow, 0 4px 16px rgba(0, 0, 0, 0.25));
+  padding: 1.2em 1.4em;
+  width: 100%;
+  max-width: 960px;
+  max-height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6em;
+}
+
+.editor-header h2 {
+  margin: 0;
+  font-size: 1.1em;
+}
+
+.editor-chart {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: var(--radius-sm, 8px);
+  box-sizing: border-box;
+}
+
+.editor-chart .zero-line {
+  stroke: #888;
+  stroke-dasharray: 4 3;
+}
+
+.editor-chart .grid-line {
+  stroke: currentColor;
+  opacity: 0.12;
+}
+
+.editor-chart .axis-label {
+  font-size: 11px;
+  fill: currentColor;
+  opacity: 0.7;
+}
+
+.editor-chart .segment-line {
+  stroke-width: 3;
+  fill: none;
+}
+
+.editor-chart .segment-line.constant {
+  stroke: #396cd8;
+}
+
+.editor-chart .segment-line.drift {
+  stroke: #d38a39;
+}
+
+.editor-chart .segment-label {
+  font-size: 11px;
+  fill: currentColor;
+  opacity: 0.85;
+}
+
+.boundary-handle {
+  cursor: ew-resize;
+}
+
+.boundary-line {
+  stroke: #d33;
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+
+.boundary-handle circle {
+  fill: #d33;
+}
+
+.editor-table-wrap {
+  margin-top: 0.8em;
+  max-height: 14em;
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: var(--radius-sm, 8px);
+}
+
+.editor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.editor-table th,
+.editor-table td {
+  padding: 0.35em 0.5em;
+  text-align: center;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+}
+
+.editor-table th {
+  font-size: 0.75em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface-alt, rgba(128, 128, 128, 0.08));
+}
+
+.editor-table input {
+  width: 5.5em;
+  padding: 0.25em 0.4em;
+  font-size: 0.95em;
+}
+
+.editor-actions {
+  margin-top: 1em;
+  display: flex;
+  justify-content: center;
+  gap: 0.8em;
+}
