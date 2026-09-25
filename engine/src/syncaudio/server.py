@@ -30,7 +30,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from syncaudio.analysis_cache import ANALYSIS_SAMPLE_RATE, get_envelope
-from syncaudio.ffmpeg_backend import FFmpegError, extract_peaks, extract_wav_clip, probe_audio_streams
+from syncaudio.ffmpeg_backend import FFmpegError, extract_peaks, extract_wav_clip, probe_audio_streams, probe_stream_start_time
 from syncaudio.jobs import Job, get_job, start_job
 from syncaudio.models import AudioTrackSpec
 from syncaudio.render import (
@@ -132,6 +132,12 @@ class TrackInfo(BaseModel):
     language: str | None
     channels: int | None
     sample_rate: int | None
+    # Container-level presentation delay (e.g. from mkvtoolnix's --sync), if
+    # any -- display-only: every extraction works on the track's own
+    # timeline with this delay excluded (see ffmpeg_backend._seek_args), so
+    # the GUI uses it only to show the residual offset a normal player,
+    # which does apply it, would see.
+    start_time: float
 
 
 class ProbeResponse(BaseModel):
@@ -148,7 +154,14 @@ def probe(path: str) -> ProbeResponse:
     return ProbeResponse(
         path=path,
         tracks=[
-            TrackInfo(index=s.index, codec=s.codec, language=s.language, channels=s.channels, sample_rate=s.sample_rate)
+            TrackInfo(
+                index=s.index,
+                codec=s.codec,
+                language=s.language,
+                channels=s.channels,
+                sample_rate=s.sample_rate,
+                start_time=probe_stream_start_time(path, s.index),
+            )
             for s in streams
         ],
     )

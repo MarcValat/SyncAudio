@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
@@ -14,6 +16,7 @@ _STREAM_RE = re.compile(
     r"(?P<codec>[^,]+),\s*(?P<rate>\d+)\s*Hz,\s*(?P<channels>[^,]+)"
 )
 _DURATION_RE = re.compile(r"Duration:\s*(?P<h>\d+):(?P<m>\d+):(?P<s>\d+(?:\.\d+)?)")
+_DURATION_START_RE = re.compile(r"Duration:\s*\d+:\d+:\d+(?:\.\d+)?,\s*start:\s*(?P<start>-?\d+(?:\.\d+)?)")
 _SUBTITLE_STREAM_RE = re.compile(r"^\s*Stream #\d+:(?P<index>\d+)(?:\([^)]+\))?:\s*Subtitle:\s*(?P<codec>\S+)")
 
 
@@ -106,6 +109,67 @@ def probe_duration(path: str) -> float:
     return int(match["h"]) * 3600 + int(match["m"]) * 60 + float(match["s"])
 
 
+@lru_cache(maxsize=256)
+def probe_stream_start_time(path: str, stream_index: int) -> float:
+    """Container-level presentation delay of one audio stream (0.0 if none).
+
+    A track remuxed with a per-track delay (e.g. mkvtoolnix's ``--sync``, or
+    any tool that shifts a track's block timestamps instead of re-encoding
+    it) only starts *presenting* at this offset. ffmpeg handles it
+    inconsistently when decoding to raw audio (verified empirically): with
+    no ``-ss``, or ``-ss`` below the delay, output starts at the track's
+    first sample (delay dropped); with ``-ss T`` at or past the delay, it
+    lands on own-time ``T - delay`` (delay honored). See ``_seek_args``,
+    which uses this value to keep every windowed extraction in the track's
+    own timeline.
+
+    Method: ffmpeg's default output muxing normalizes away a stream's start
+    time (``-avoid_negative_ts make_zero``); isolating the stream into its
+    own container with ``-copyts`` (which disables that) and re-probing it
+    reveals ffmpeg's own internal understanding of the delay. Best-effort:
+    returns 0.0 on any failure rather than raising, since this must never
+    break the actual detection/render pipeline it's decoupled from.
+    """
+    ffmpeg = resolve_ffmpeg()
+    with tempfile.TemporaryDirectory(prefix="syncaudio-starttime-") as tmp_dir:
+        tmp_path = str(Path(tmp_dir) / "probe.mka")
+        extract = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", path, "-map", f"0:a:{stream_index}", "-c", "copy", "-copyts", tmp_path,
+            ],
+            capture_output=True,
+        )
+        if extract.returncode != 0:
+            return 0.0
+        probe = subprocess.run([ffmpeg, "-hide_banner", "-i", tmp_path], capture_output=True, text=True)
+        match = _DURATION_START_RE.search(probe.stderr)
+        return float(match["start"]) if match else 0.0
+
+
+def _seek_args(spec: AudioTrackSpec, start: float) -> list[str]:
+    """``-ss`` args landing on ``start`` in the track's own timeline.
+
+    Whole-track extraction (detection, waveforms) always sees the track from
+    its first sample, container delay dropped. A plain ``-ss start`` only
+    agrees with that when ``start`` is below the delay; past it, ffmpeg
+    honors the delay and every clip ends up shifted by it. Seeking to
+    ``start + delay`` is always in the honored regime and lands exactly on
+    own-time ``start``, for any ``start``.
+    """
+    stream_index = spec.stream_index if spec.stream_index is not None else 0
+    # -ss is relative to the file's own start, i.e. the earliest stream.
+    delay = max(0.0, probe_stream_start_time(spec.path, stream_index) - _probe_format_start_time(spec.path))
+    return ["-ss", f"{start + delay:.6f}"]
+
+
+@lru_cache(maxsize=256)
+def _probe_format_start_time(path: str) -> float:
+    probe = subprocess.run([resolve_ffmpeg(), "-hide_banner", "-i", path], capture_output=True, text=True)
+    match = _DURATION_START_RE.search(probe.stderr)
+    return float(match["start"]) if match else 0.0
+
+
 def _list_subtitle_streams(path: str) -> list[re.Match[str]]:
     ffmpeg = resolve_ffmpeg()
     proc = subprocess.run(
@@ -156,7 +220,7 @@ def extract_pcm(
     stream_index = spec.stream_index if spec.stream_index is not None else 0
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
     if start is not None:
-        cmd += ["-ss", str(start)]
+        cmd += _seek_args(spec, start)
     cmd += ["-i", spec.path]
     if duration is not None:
         cmd += ["-t", str(duration)]
@@ -228,7 +292,7 @@ def extract_wav_clip(spec: AudioTrackSpec, start: float, duration: float, sample
     stream_index = spec.stream_index if spec.stream_index is not None else 0
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
-        "-ss", str(start), "-i", spec.path, "-t", str(duration),
+        *_seek_args(spec, start), "-i", spec.path, "-t", str(duration),
         "-map", f"0:a:{stream_index}",
         "-ar", str(sample_rate),
         "-f", "wav", "-acodec", "pcm_s16le", "-",

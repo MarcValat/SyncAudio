@@ -91,6 +91,35 @@ def test_probe_lists_tracks(offset_mkv: tuple[Path, float]) -> None:
     assert body["path"] == str(mkv)
     assert [t["index"] for t in body["tracks"]] == [0, 1]
     assert [t["language"] for t in body["tracks"]] == ["jpn", "fre"]
+    assert [t["start_time"] for t in body["tracks"]] == [0.0, 0.0]  # no container-level delay here
+
+
+def test_probe_reports_container_level_track_delay(tmp_path: Path) -> None:
+    ffmpeg = resolve_ffmpeg()
+    sr = 44100
+    wav_a = tmp_path / "a.wav"
+    wav_b = tmp_path / "b.wav"
+    _write_wav(wav_a, _make_bed(2.0, sr, seed=1), sr)
+    _write_wav(wav_b, _make_bed(2.0, sr, seed=2), sr)
+
+    mkv = tmp_path / "delayed.mkv"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:d=3",
+            "-i", str(wav_a),
+            "-itsoffset", "1.0", "-i", str(wav_b),
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-shortest", str(mkv),
+        ],
+        check=True, capture_output=True,
+    )
+
+    resp = client.get("/probe", params={"path": str(mkv)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert abs(body["tracks"][0]["start_time"] - 0.0) < 0.05
+    assert abs(body["tracks"][1]["start_time"] - 1.0) < 0.05
 
 
 def test_probe_missing_file_returns_400() -> None:
