@@ -1,11 +1,41 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import stft
 
 DEFAULT_N_FFT = 1024
 DEFAULT_HOP = 256
+
+# scipy.ndimage releases the GIL, so plain threads parallelize the median
+# filters (~90% of analysis time) across cores.
+_WORKERS = os.cpu_count() or 1
+_pool = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="syncaudio-median")
+
+
+def _parallel_median_filter(mag: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """``median_filter(mag, size)``, split into time chunks run in parallel.
+
+    Each chunk is padded with the neighbouring frames the filter window
+    reaches into, then trimmed back, so the result is bit-identical to a
+    single call (the file's true edges keep scipy's own border handling).
+    """
+    frames = mag.shape[1]
+    halo = size[1] // 2
+    chunks = min(_WORKERS, max(1, frames // 256))
+    if chunks == 1:
+        return median_filter(mag, size=size)
+    bounds = np.linspace(0, frames, chunks + 1, dtype=int)
+
+    def run(i: int) -> np.ndarray:
+        a, b = bounds[i], bounds[i + 1]
+        lo, hi = max(0, a - halo), min(frames, b + halo)
+        return median_filter(mag[:, lo:hi], size=size)[:, a - lo : b - lo]
+
+    return np.concatenate(list(_pool.map(run, range(chunks))), axis=1)
 
 
 def _stft_magnitude(signal: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
@@ -21,8 +51,8 @@ def _percussive_component(mag: np.ndarray, harm_win: int = 17, perc_win: int = 1
     speech) is smooth across time but narrow in frequency — median-filtering
     each way and soft-masking separates them (Fitzgerald, 2010).
     """
-    harmonic = median_filter(mag, size=(1, harm_win))
-    percussive = median_filter(mag, size=(perc_win, 1))
+    harmonic = _parallel_median_filter(mag, (1, harm_win))
+    percussive = _parallel_median_filter(mag, (perc_win, 1))
     eps = 1e-10
     mask = percussive / (percussive + harmonic + eps)
     return mag * mask

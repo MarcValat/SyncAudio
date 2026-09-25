@@ -2,14 +2,15 @@
 
 Measured on a real 6-minute track: ffmpeg extraction (decode to PCM) takes
 ~0.3-0.4s, negligible; the envelope computation (STFT + harmonic/percussive
-median-filter separation, in ``features.py``) takes ~6.7-6.8s -- over 90% of
-total analysis time, and pure CPU-bound numpy/scipy work with no I/O to
+median-filter separation, in ``features.py``) took ~7s single-threaded,
+~1.5s now that the median filters run across all cores (8 here) -- still
+most of the total, and pure CPU-bound numpy/scipy work with no I/O to
 speed up (so e.g. ``mkvextract`` wouldn't help: it only demuxes, and
 decoding was never the bottleneck). ``align``/``segments``/``render`` each
 re-extract and re-analyze their reference (and every candidate) from
 scratch, even across separate calls on the exact same track -- this cache
 lets a second request for the same (file, track, analysis window) skip
-straight to the correlation math instead of redoing that ~7s.
+straight to the correlation math instead of redoing that work.
 
 Concurrent requests for the *same* key (e.g. a background prefetch and a
 user-triggered detection racing each other) are coalesced: only the first
