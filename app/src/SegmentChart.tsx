@@ -45,7 +45,17 @@ export function SegmentChart({ segments }: { segments: SegmentOut[] }) {
 
   return (
     <div className="segment-chart">
-      <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Décalage en fonction du temps">
+      {/* aspect-ratio (not just viewBox + CSS height:auto) is needed inside
+          a flex container: a flex item's height-from-width-via-aspect-ratio
+          isn't reliably resolved from viewBox alone before layout runs,
+          which was making this chart render tiny once its parent became a
+          flex column (see App.css's analysis-card chain). */}
+      <svg
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
+        role="img"
+        aria-label="Décalage en fonction du temps"
+      >
         <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>
           {/* zero-offset reference line */}
           <line x1={0} y1={y(0)} x2={PLOT_W} y2={y(0)} className="zero-line" />

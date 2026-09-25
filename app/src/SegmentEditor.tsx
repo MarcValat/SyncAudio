@@ -46,9 +46,17 @@ function toSegments(state: EditorState): SegmentOut[] {
   });
 }
 
-/** Merge segment `i` into segment `i + 1`'s slot (or the previous one, if
- * `i` is the last segment) -- used for both "merge with neighbour" and
- * "delete" (deleting is just merging into whichever neighbour exists). */
+/** Merge segment `i` into neighbour `j`'s slot (next, or previous if `i` is
+ * the last segment) -- segment `i` is discarded entirely and `j`'s own
+ * offset_start/offset_end now stretch across the combined time range. Used
+ * for both "merge with neighbour" and "delete a spurious segment": deleting
+ * only makes sense if the survivor's characteristics -- not a blend with
+ * the one being removed -- are what cover the freed-up span, otherwise a
+ * bad detection right at a file's tail (say) can never actually be
+ * cancelled, just diluted (this was previously taking offset_start from
+ * whichever segment has the lower index and offset_end from whichever has
+ * the higher one, regardless of which was `i` -- for a backward merge that
+ * kept exactly the *wrong* half of each). */
 function mergeSegment(state: EditorState, i: number): EditorState {
   const mergeWithNext = i < state.offsetStarts.length - 1;
   const j = mergeWithNext ? i + 1 : i - 1;
@@ -56,8 +64,8 @@ function mergeSegment(state: EditorState, i: number): EditorState {
   const hi = Math.max(i, j);
   return {
     times: [...state.times.slice(0, lo + 1), ...state.times.slice(hi + 1)],
-    offsetStarts: [...state.offsetStarts.slice(0, lo), state.offsetStarts[lo], ...state.offsetStarts.slice(hi + 1)],
-    offsetEnds: [...state.offsetEnds.slice(0, lo), state.offsetEnds[hi], ...state.offsetEnds.slice(hi + 1)],
+    offsetStarts: [...state.offsetStarts.slice(0, lo), state.offsetStarts[j], ...state.offsetStarts.slice(hi + 1)],
+    offsetEnds: [...state.offsetEnds.slice(0, lo), state.offsetEnds[j], ...state.offsetEnds.slice(hi + 1)],
   };
 }
 
@@ -73,6 +81,35 @@ export function SegmentEditor({
   const [state, setState] = useState<EditorState>(() => toEditorState(segments));
   const [dragging, setDragging] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+
+  // Raw text currently being typed into a numeric cell, keyed by e.g.
+  // "offsetStart-2" -- kept separate from `state` (the committed numbers)
+  // so an in-progress, not-yet-valid string ("-", "-0.", an empty field)
+  // is shown exactly as typed instead of being round-tripped through
+  // Number()+toFixed() on every keystroke, which turns "-" into NaN and
+  // immediately overwrites it back to something else -- the bug this
+  // replaced (typing a negative offset was impossible). Cleared on blur so
+  // the field then shows the committed, normalized value.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  function cellValue(key: string, committed: number): string {
+    return key in drafts ? drafts[key] : committed.toFixed(2);
+  }
+
+  function handleCellChange(key: string, raw: string, commit: (n: number) => void) {
+    setDrafts((d) => ({ ...d, [key]: raw }));
+    const n = parseFloat(raw);
+    if (Number.isFinite(n)) commit(n);
+  }
+
+  function handleCellBlur(key: string) {
+    setDrafts((d) => {
+      if (!(key in d)) return d;
+      const next = { ...d };
+      delete next[key];
+      return next;
+    });
+  }
 
   const totalDuration = state.times[state.times.length - 1];
   const offsetsFlat = [...state.offsetStarts, ...state.offsetEnds];
@@ -226,36 +263,40 @@ export function SegmentEditor({
                   <td>{i + 1}</td>
                   <td>
                     <input
-                      type="number"
-                      step="0.01"
-                      value={seg.start_s.toFixed(2)}
+                      type="text"
+                      inputMode="decimal"
+                      value={cellValue(`start-${i}`, seg.start_s)}
                       disabled={i === 0}
-                      onChange={(e) => updateTime(i, Number(e.target.value))}
+                      onChange={(e) => handleCellChange(`start-${i}`, e.target.value, (n) => updateTime(i, n))}
+                      onBlur={() => handleCellBlur(`start-${i}`)}
                     />
                   </td>
                   <td>
                     <input
-                      type="number"
-                      step="0.01"
-                      value={seg.end_s.toFixed(2)}
+                      type="text"
+                      inputMode="decimal"
+                      value={cellValue(`end-${i}`, seg.end_s)}
                       disabled={i === segmentsPreview.length - 1}
-                      onChange={(e) => updateTime(i + 1, Number(e.target.value))}
+                      onChange={(e) => handleCellChange(`end-${i}`, e.target.value, (n) => updateTime(i + 1, n))}
+                      onBlur={() => handleCellBlur(`end-${i}`)}
                     />
                   </td>
                   <td>
                     <input
-                      type="number"
-                      step="0.01"
-                      value={seg.offset_start.toFixed(2)}
-                      onChange={(e) => updateOffset("start", i, Number(e.target.value))}
+                      type="text"
+                      inputMode="decimal"
+                      value={cellValue(`offsetStart-${i}`, seg.offset_start)}
+                      onChange={(e) => handleCellChange(`offsetStart-${i}`, e.target.value, (n) => updateOffset("start", i, n))}
+                      onBlur={() => handleCellBlur(`offsetStart-${i}`)}
                     />
                   </td>
                   <td>
                     <input
-                      type="number"
-                      step="0.01"
-                      value={seg.offset_end.toFixed(2)}
-                      onChange={(e) => updateOffset("end", i, Number(e.target.value))}
+                      type="text"
+                      inputMode="decimal"
+                      value={cellValue(`offsetEnd-${i}`, seg.offset_end)}
+                      onChange={(e) => handleCellChange(`offsetEnd-${i}`, e.target.value, (n) => updateOffset("end", i, n))}
+                      onBlur={() => handleCellBlur(`offsetEnd-${i}`)}
                     />
                   </td>
                   <td>

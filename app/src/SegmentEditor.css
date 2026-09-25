@@ -123,7 +123,7 @@
   background: var(--surface-alt, rgba(128, 128, 128, 0.08));
 }
 
-.editor-table input[type="number"] {
+.editor-table input {
   width: 5.5em;
   padding: 0.25em 0.4em;
   font-size: 0.95em;
